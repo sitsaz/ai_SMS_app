@@ -9,6 +9,8 @@ import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -124,20 +126,84 @@ object AndroidCompat {
         }
     }
 
-    fun ensureSmsNotificationChannel(context: Context, title: String) {
+    fun smsNotificationChannelId(version: Int): String {
+        val safeVer = version.coerceAtLeast(1)
+        return if (safeVer == 1) SMS_CHANNEL_ID else "${SMS_CHANNEL_ID}_v$safeVer"
+    }
+
+    fun ensureSmsNotificationChannel(
+        context: Context,
+        title: String,
+        channelVersion: Int = 1,
+        ringtoneUriString: String = "",
+        vibrate: Boolean = true
+    ): String {
+        val channelId = smsNotificationChannelId(channelVersion)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = context.getSystemService(NotificationManager::class.java) ?: return
-            val existing = manager.getNotificationChannel(SMS_CHANNEL_ID)
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return channelId
+            // Clean up older versioned SMS channels so the user only sees the active one
+            if (channelVersion > 1) {
+                runCatching { manager.deleteNotificationChannel(SMS_CHANNEL_ID) }
+                for (oldV in 2 until channelVersion) {
+                    runCatching { manager.deleteNotificationChannel("${SMS_CHANNEL_ID}_v$oldV") }
+                }
+            }
+            val existing = manager.getNotificationChannel(channelId)
             if (existing == null) {
                 val channel = NotificationChannel(
-                    SMS_CHANNEL_ID,
+                    channelId,
                     title,
                     NotificationManager.IMPORTANCE_HIGH
-                )
+                ).apply {
+                    enableVibration(vibrate)
+                    val soundUri = when {
+                        ringtoneUriString == RINGTONE_SILENT_VALUE -> null
+                        ringtoneUriString.isNotBlank() -> runCatching { Uri.parse(ringtoneUriString) }.getOrNull()
+                        else -> RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                    }
+                    if (soundUri != null) {
+                        val attrs = AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                        setSound(soundUri, attrs)
+                    } else {
+                        setSound(null, null)
+                    }
+                }
                 manager.createNotificationChannel(channel)
             }
         }
+        return channelId
     }
+
+    fun createSmsChannelSettingsIntent(context: Context, channelVersion: Int): Intent {
+        val channelId = smsNotificationChannelId(channelVersion)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                putExtra(Settings.EXTRA_CHANNEL_ID, channelId)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        } else {
+            createAppDetailsSettingsIntent(context)
+        }
+    }
+
+    fun resolveRingtoneTitle(context: Context, uriString: String, isPersian: Boolean): String {
+        if (uriString == RINGTONE_SILENT_VALUE) {
+            return if (isPersian) "بی‌صدا" else "Silent"
+        }
+        if (uriString.isBlank()) {
+            return if (isPersian) "صدای پیش‌فرض سیستم" else "System Default"
+        }
+        return runCatching {
+            val uri = Uri.parse(uriString)
+            RingtoneManager.getRingtone(context, uri)?.getTitle(context)?.takeIf { it.isNotBlank() }
+        }.getOrNull() ?: if (isPersian) "آهنگ انتخاب‌شده" else "Custom Tone"
+    }
+
+    const val RINGTONE_SILENT_VALUE = "__silent__"
 
     fun pendingIntentImmutableFlags(): Int {
         return PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE

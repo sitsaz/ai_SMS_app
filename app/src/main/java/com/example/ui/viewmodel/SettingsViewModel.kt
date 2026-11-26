@@ -1,6 +1,8 @@
 package com.example.ui.viewmodel
 
 import android.app.Application
+import android.content.Intent
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.AiSmsApplication
@@ -8,8 +10,12 @@ import com.example.core.localization.AppLanguage
 import com.example.core.localization.CalendarMode
 import com.example.core.localization.CalendarPreference
 import com.example.core.localization.DateUtils
+import com.example.data.drive.DriveAccountTokenOutcome
 import com.example.data.drive.DriveBackupFileInfo
+import com.example.data.drive.GoogleDriveAuthHelper
+import com.example.data.drive.PkceSession
 import com.example.data.local.AiProviderType
+import com.example.data.local.BackupSyncMode
 import com.example.data.local.ThemeMode
 import com.example.data.preferences.AppSettings
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
@@ -25,7 +31,13 @@ import kotlinx.coroutines.launch
 sealed interface ConnectionTestState {
     data object Idle : ConnectionTestState
     data object Testing : ConnectionTestState
-    data class Success(val preview: String) : ConnectionTestState
+    data class Success(
+        val preview: String,
+        val supportsFileUpload: Boolean = false,
+        val supportsImageInput: Boolean = false,
+        val detectedContextLength: Int? = null,
+        val capabilitySummary: String = ""
+    ) : ConnectionTestState
     data class Error(val message: String) : ConnectionTestState
 }
 
@@ -42,7 +54,8 @@ data class DriveBackupUiState(
     val isBusy: Boolean = false,
     val backups: List<DriveBackupFileInfo> = emptyList(),
     val statusMessage: String? = null,
-    val isError: Boolean = false
+    val isError: Boolean = false,
+    val showTroubleshooting: Boolean = false
 ) {
     val isConnected: Boolean get() = accessToken.isNotBlank()
 }
@@ -51,13 +64,29 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val container = (application as AiSmsApplication).container
     private val settingsRepo = container.settingsRepository
     private val aiClient = container.aiSearchClient
-    private val driveManager = container.googleDriveBackupManager
+    private val backupManager = container.backupManager
+
+    val apkPackageName: String = GoogleDriveAuthHelper.getAppPackageName(application)
+    val apkSha1Fingerprint: String = GoogleDriveAuthHelper.getAppSigningSha1(application)
+
+    private val _driveState = MutableStateFlow(DriveBackupUiState())
+    val driveState: StateFlow<DriveBackupUiState> = _driveState.asStateFlow()
 
     val settings: StateFlow<AppSettings> = settingsRepo.settingsFlow
         .onEach { s ->
             DateUtils.updateCalendarMode(s.resolvedCalendarMode)
-            if (s.driveConnectedEmail.isNotBlank() && _driveState.value.accountEmail.isBlank()) {
-                _driveState.update { it.copy(accountEmail = s.driveConnectedEmail) }
+            _driveState.update { cur ->
+                val hydratedEmail = if (cur.accountEmail.isBlank() && s.driveConnectedEmail.isNotBlank()) {
+                    s.driveConnectedEmail
+                } else {
+                    cur.accountEmail
+                }
+                val hydratedToken = if (cur.accessToken.isBlank() && s.driveAccessToken.isNotBlank()) {
+                    s.driveAccessToken
+                } else {
+                    cur.accessToken
+                }
+                cur.copy(accountEmail = hydratedEmail, accessToken = hydratedToken)
             }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppSettings())
@@ -76,8 +105,26 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _modelsState = MutableStateFlow<ModelsFetchState>(ModelsFetchState.Idle)
     val modelsState: StateFlow<ModelsFetchState> = _modelsState.asStateFlow()
 
-    private val _driveState = MutableStateFlow(DriveBackupUiState())
-    val driveState: StateFlow<DriveBackupUiState> = _driveState.asStateFlow()
+    init {
+        viewModelScope.launch {
+            val saved = settingsRepo.getCurrentSettings()
+            if (saved.driveAccessToken.isNotBlank() || saved.driveConnectedEmail.isNotBlank()) {
+                val freshToken = backupManager.obtainSilentAccessToken() ?: saved.driveAccessToken
+                if (freshToken.isNotBlank()) {
+                    _driveState.update {
+                        it.copy(
+                            accessToken = freshToken,
+                            accountEmail = saved.driveConnectedEmail
+                        )
+                    }
+                    val listRes = backupManager.listBackups(freshToken)
+                    listRes.onSuccess { files ->
+                        _driveState.update { it.copy(backups = files) }
+                    }
+                }
+            }
+        }
+    }
 
     fun setLanguage(language: AppLanguage) {
         viewModelScope.launch { settingsRepo.setLanguage(language) }
@@ -99,9 +146,37 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch { settingsRepo.setCaptureNotifications(enabled) }
     }
 
+    fun setSmsNotificationsEnabled(enabled: Boolean) {
+        viewModelScope.launch { settingsRepo.setSmsNotificationsEnabled(enabled) }
+    }
+
+    fun setShowNotificationPreviewText(enabled: Boolean) {
+        viewModelScope.launch { settingsRepo.setShowNotificationPreviewText(enabled) }
+    }
+
+    fun setNotificationVibrate(enabled: Boolean) {
+        viewModelScope.launch { settingsRepo.setNotificationVibrate(enabled) }
+    }
+
+    fun setSmsRingtone(uri: String, title: String) {
+        viewModelScope.launch { settingsRepo.setSmsRingtone(uri, title) }
+    }
+
     fun setBackupScope(includeSms: Boolean, includeNotifications: Boolean) {
         viewModelScope.launch {
             settingsRepo.setBackupScope(includeSms, includeNotifications)
+        }
+    }
+
+    fun setBackupSyncMode(mode: BackupSyncMode) {
+        viewModelScope.launch {
+            backupManager.setSyncMode(mode)
+        }
+    }
+
+    fun triggerAutoBackupIfDue() {
+        viewModelScope.launch {
+            backupManager.syncSilentlyIfDue(force = false)
         }
     }
 
@@ -109,10 +184,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         provider: AiProviderType,
         baseUrl: String,
         modelName: String,
-        apiKey: String
+        apiKey: String,
+        contextLimitTokens: Int = 32_000
     ) {
         viewModelScope.launch {
-            settingsRepo.saveAiConfig(provider, baseUrl, modelName, apiKey)
+            settingsRepo.saveAiConfig(provider, baseUrl, modelName, apiKey, contextLimitTokens)
         }
     }
 
@@ -155,15 +231,29 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         baseUrl: String,
         modelName: String,
         apiKey: String,
+        contextLimitTokens: Int,
         isPersian: Boolean
     ) {
         viewModelScope.launch {
             _testState.value = ConnectionTestState.Testing
-            settingsRepo.saveAiConfig(provider, baseUrl, modelName, apiKey)
+            settingsRepo.saveAiConfig(provider, baseUrl, modelName, apiKey, contextLimitTokens)
             val testSettings = settingsRepo.getCurrentSettings()
-            val result = aiClient.testConnection(testSettings, isPersian)
+            val result = aiClient.testConnectionWithCapabilities(testSettings, isPersian)
             _testState.value = result.fold(
-                onSuccess = { ConnectionTestState.Success(it) },
+                onSuccess = { report ->
+                    settingsRepo.saveAiCapabilities(
+                        supportsFileUpload = report.supportsFileUpload,
+                        supportsImageInput = report.supportsImageInput,
+                        detail = report.capabilitySummary
+                    )
+                    ConnectionTestState.Success(
+                        preview = report.replyPreview,
+                        supportsFileUpload = report.supportsFileUpload,
+                        supportsImageInput = report.supportsImageInput,
+                        detectedContextLength = report.detectedContextLength,
+                        capabilitySummary = report.capabilitySummary
+                    )
+                },
                 onFailure = { ConnectionTestState.Error(it.localizedMessage ?: "Connection failed") }
             )
         }
@@ -177,30 +267,117 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         _modelsState.value = ModelsFetchState.Idle
     }
 
-    // Google Drive Backup & Restore
+    // Google Drive Backup & Restore + Device OAuth Fallbacks
     fun buildDriveAuthorizationRequest(): AuthorizationRequest =
-        driveManager.buildAuthorizationRequest()
+        backupManager.buildAuthorizationRequest()
 
-    fun onDriveAuthorized(accessToken: String, isPersian: Boolean) {
+    fun setDriveTroubleshootingVisible(visible: Boolean) {
+        _driveState.update { it.copy(showTroubleshooting = visible) }
+    }
+
+    fun saveDriveCustomClientId(clientId: String) {
         viewModelScope.launch {
+            settingsRepo.setDriveCustomClientId(clientId)
+        }
+    }
+
+    fun startBrowserPkceSession(customClientId: String): PkceSession? {
+        viewModelScope.launch {
+            settingsRepo.setDriveCustomClientId(customClientId)
+        }
+        return GoogleDriveAuthHelper.startBrowserPkceSession(getApplication(), customClientId)
+    }
+
+    fun completeBrowserPkce(session: PkceSession, rawUrlOrCode: String, isPersian: Boolean) {
+        val code = extractAuthCode(rawUrlOrCode)
+        if (code.isBlank()) {
+            onDriveAuthFailed(
+                if (isPersian) "کد تایید OAuth در آدرس یافت نشد." else "No OAuth authorization code found."
+            )
+            return
+        }
+        viewModelScope.launch {
+            _driveState.update { it.copy(isBusy = true, statusMessage = null, isError = false) }
+            val tokenRes = GoogleDriveAuthHelper.exchangePkceCodeForTokens(session, code)
+            tokenRes.onSuccess { (access, refresh) ->
+                onDriveAuthorized(accessToken = access, isPersian = isPersian, refreshToken = refresh)
+            }.onFailure { err ->
+                onDriveAuthFailed(err.localizedMessage ?: "Browser OAuth exchange failed")
+            }
+        }
+    }
+
+    fun connectDriveWithGoogleAccount(
+        accountEmail: String,
+        isPersian: Boolean,
+        onRecoverable: (Intent) -> Unit
+    ) {
+        viewModelScope.launch {
+            _driveState.update { it.copy(isBusy = true, statusMessage = null, isError = false) }
+            when (val outcome = GoogleDriveAuthHelper.requestTokenForAccount(getApplication(), accountEmail, isPersian)) {
+                is DriveAccountTokenOutcome.Success -> {
+                    onDriveAuthorized(
+                        accessToken = outcome.accessToken,
+                        isPersian = isPersian,
+                        knownEmail = outcome.accountEmail
+                    )
+                }
+                is DriveAccountTokenOutcome.Recoverable -> {
+                    _driveState.update { it.copy(isBusy = false, accountEmail = outcome.accountEmail) }
+                    onRecoverable(outcome.recoveryIntent)
+                }
+                is DriveAccountTokenOutcome.Failure -> {
+                    _driveState.update {
+                        it.copy(
+                            isBusy = false,
+                            statusMessage = outcome.message,
+                            isError = true,
+                            showTroubleshooting = it.showTroubleshooting || outcome.isConfigurationError
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun connectWithManualAccessToken(rawToken: String, isPersian: Boolean) {
+        val clean = rawToken.trim().removePrefix("Bearer ").removePrefix("bearer ").trim()
+        if (clean.isBlank()) {
+            onDriveAuthFailed(if (isPersian) "توکن معتبر وارد کنید." else "Please enter a valid OAuth access token.")
+            return
+        }
+        onDriveAuthorized(accessToken = clean, isPersian = isPersian)
+    }
+
+    fun onDriveAuthorized(
+        accessToken: String,
+        isPersian: Boolean,
+        refreshToken: String = "",
+        knownEmail: String = ""
+    ) {
+        viewModelScope.launch {
+            settingsRepo.setDriveTokens(accessToken, refreshToken)
             _driveState.update {
                 it.copy(
                     accessToken = accessToken,
+                    accountEmail = knownEmail.ifBlank { it.accountEmail },
                     isBusy = true,
                     statusMessage = null,
-                    isError = false
+                    isError = false,
+                    showTroubleshooting = false
                 )
             }
-            val email = driveManager.fetchAccountEmail(accessToken).getOrDefault("")
-            if (email.isNotBlank()) {
-                settingsRepo.setDriveConnectionInfo(email)
+            val fetchedEmail = backupManager.fetchAccountEmail(accessToken).getOrDefault("")
+            val resolvedEmail = fetchedEmail.ifBlank { knownEmail }
+            if (resolvedEmail.isNotBlank()) {
+                settingsRepo.setDriveConnectionInfo(resolvedEmail)
             }
-            val listRes = driveManager.listBackups(accessToken)
+            val listRes = backupManager.listBackups(accessToken)
             _driveState.update { cur ->
                 listRes.fold(
                     onSuccess = { files ->
                         cur.copy(
-                            accountEmail = email.ifBlank { cur.accountEmail },
+                            accountEmail = resolvedEmail.ifBlank { cur.accountEmail },
                             isBusy = false,
                             backups = files,
                             statusMessage = if (isPersian) "اتصال به Google Drive برقرار شد." else "Connected to Google Drive.",
@@ -209,7 +386,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     },
                     onFailure = { err ->
                         cur.copy(
-                            accountEmail = email.ifBlank { cur.accountEmail },
+                            accountEmail = resolvedEmail.ifBlank { cur.accountEmail },
                             isBusy = false,
                             statusMessage = err.localizedMessage ?: "Failed to list Drive backups",
                             isError = true
@@ -217,6 +394,18 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     }
                 )
             }
+        }
+    }
+
+    fun onDriveAuthException(err: Throwable, isPersian: Boolean) {
+        val (msg, isConfig) = GoogleDriveAuthHelper.describeDriveAuthException(getApplication(), err, isPersian)
+        _driveState.update {
+            it.copy(
+                isBusy = false,
+                statusMessage = msg,
+                isError = true,
+                showTroubleshooting = it.showTroubleshooting || isConfig
+            )
         }
     }
 
@@ -229,6 +418,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun disconnectDrive(isPersian: Boolean) {
         viewModelScope.launch {
             settingsRepo.setDriveConnectionInfo("")
+            settingsRepo.setDriveTokens("", "")
+            backupManager.setSyncMode(BackupSyncMode.MANUAL)
             _driveState.value = DriveBackupUiState(
                 statusMessage = if (isPersian) "اتصال Google Drive قطع شد." else "Disconnected from Google Drive.",
                 isError = false
@@ -237,11 +428,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun refreshDriveBackups(isPersian: Boolean) {
-        val token = _driveState.value.accessToken
-        if (token.isBlank()) return
         viewModelScope.launch {
+            val token = resolveActiveDriveToken()
+            if (token.isBlank()) {
+                onDriveAuthFailed(if (isPersian) "ابتدا به Google Drive متصل شوید." else "Connect Google Drive first.")
+                return@launch
+            }
             _driveState.update { it.copy(isBusy = true, statusMessage = null, isError = false) }
-            val res = driveManager.listBackups(token)
+            val res = backupManager.listBackups(token)
             _driveState.update { cur ->
                 res.fold(
                     onSuccess = { files ->
@@ -265,20 +459,22 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun backupToGoogleDrive(isPersian: Boolean) {
-        val token = _driveState.value.accessToken
-        if (token.isBlank()) return
         viewModelScope.launch {
+            val token = resolveActiveDriveToken()
+            if (token.isBlank()) {
+                onDriveAuthFailed(if (isPersian) "ابتدا به Google Drive متصل شوید." else "Connect Google Drive first.")
+                return@launch
+            }
             val s = settingsRepo.getCurrentSettings()
             _driveState.update { it.copy(isBusy = true, statusMessage = null, isError = false) }
-            val res = driveManager.createAndUploadBackup(
+            val res = backupManager.performSelectiveBackup(
                 accessToken = token,
                 includeSms = s.backupIncludeSms,
                 includeNotifications = s.backupIncludeNotifications
             )
             if (res.isSuccess) {
                 val uploaded = res.getOrThrow()
-                settingsRepo.setLastDriveBackupMs(System.currentTimeMillis())
-                val updatedList = driveManager.listBackups(token).getOrDefault(
+                val updatedList = backupManager.listBackups(token).getOrDefault(
                     listOf(uploaded) + _driveState.value.backups
                 )
                 val smsN = DateUtils.formatNumber(uploaded.smsCount, isPersian)
@@ -308,12 +504,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun restoreFromGoogleDrive(fileId: String, isPersian: Boolean) {
-        val token = _driveState.value.accessToken
-        if (token.isBlank()) return
         viewModelScope.launch {
+            val token = resolveActiveDriveToken()
+            if (token.isBlank()) return@launch
             val s = settingsRepo.getCurrentSettings()
             _driveState.update { it.copy(isBusy = true, statusMessage = null, isError = false) }
-            val res = driveManager.restoreBackup(
+            val res = backupManager.performSelectiveRestore(
                 accessToken = token,
                 fileId = fileId,
                 restoreSms = s.backupIncludeSms,
@@ -343,11 +539,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun deleteDriveBackup(fileId: String, isPersian: Boolean) {
-        val token = _driveState.value.accessToken
-        if (token.isBlank()) return
         viewModelScope.launch {
+            val token = resolveActiveDriveToken()
+            if (token.isBlank()) return@launch
             _driveState.update { it.copy(isBusy = true, statusMessage = null, isError = false) }
-            val res = driveManager.deleteBackup(token, fileId)
+            val res = backupManager.deleteBackup(token, fileId)
             _driveState.update { cur ->
                 res.fold(
                     onSuccess = {
@@ -368,7 +564,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     suspend fun exportLocalBackupJson(): String {
         val s = settingsRepo.getCurrentSettings()
-        return driveManager.exportLocalBackupJson(
+        return backupManager.exportLocalBackupJson(
             includeSms = s.backupIncludeSms,
             includeNotifications = s.backupIncludeNotifications
         )
@@ -378,7 +574,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             val s = settingsRepo.getCurrentSettings()
             _driveState.update { it.copy(isBusy = true, statusMessage = null, isError = false) }
-            val res = driveManager.importLocalBackupJson(
+            val res = backupManager.importLocalBackupJson(
                 rawJson = rawJson,
                 restoreSms = s.backupIncludeSms,
                 restoreNotifications = s.backupIncludeNotifications
@@ -408,5 +604,24 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun setLocalDriveMessage(message: String, isError: Boolean = false) {
         _driveState.update { it.copy(statusMessage = message, isError = isError) }
+    }
+
+    private suspend fun resolveActiveDriveToken(): String {
+        val cur = _driveState.value.accessToken
+        if (cur.isNotBlank()) return cur
+        val refreshed = backupManager.obtainSilentAccessToken().orEmpty()
+        if (refreshed.isNotBlank()) {
+            _driveState.update { it.copy(accessToken = refreshed) }
+        }
+        return refreshed
+    }
+
+    private fun extractAuthCode(rawUrlOrCode: String): String {
+        val trimmed = rawUrlOrCode.trim()
+        if (trimmed.contains("://") || trimmed.contains("code=")) {
+            val parsed = runCatching { Uri.parse(trimmed).getQueryParameter("code") }.getOrNull()
+            if (!parsed.isNullOrBlank()) return parsed
+        }
+        return trimmed
     }
 }

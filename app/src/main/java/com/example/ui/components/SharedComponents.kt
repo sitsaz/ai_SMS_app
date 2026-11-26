@@ -20,6 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -193,6 +194,8 @@ fun SearchResultCard(
     val isNotif = item.source == ArchiveItemSource.NOTIFICATION
     val highlightBg = MaterialTheme.colorScheme.primaryContainer
     val highlightFg = MaterialTheme.colorScheme.onPrimaryContainer
+    val clipboard = LocalClipboardManager.current
+    var copied by remember(item.refId) { mutableStateOf(false) }
 
     val annotatedBody = remember(item.body, highlightQuery, highlightBg, highlightFg) {
         buildHighlightedText(item.body, highlightQuery, highlightBg, highlightFg)
@@ -276,12 +279,22 @@ fun SearchResultCard(
 
             Spacer(Modifier.height(10.dp))
 
-            // Complete, untruncated message body
-            Text(
-                text = annotatedBody,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            // Complete, untruncated message body with partial selection (and Markdown when unhighlighted)
+            if (highlightQuery.isBlank()) {
+                MarkdownText(
+                    markdown = item.body,
+                    textColor = MaterialTheme.colorScheme.onSurface,
+                    baseStyle = MaterialTheme.typography.bodyMedium
+                )
+            } else {
+                SelectionContainer {
+                    Text(
+                        text = annotatedBody,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
 
             Spacer(Modifier.height(10.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
@@ -301,6 +314,22 @@ fun SearchResultCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    IconButton(
+                        onClick = {
+                            clipboard.setText(AnnotatedString(item.body))
+                            copied = true
+                        },
+                        modifier = Modifier
+                            .size(32.dp)
+                            .testTag("copy_search_result_${item.refId}")
+                    ) {
+                        Icon(
+                            imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+                            contentDescription = strings.copyMessage,
+                            tint = if (copied) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                     if (!isNotif) {
                         if (item.isOutgoing) {
                             DeliveryStatusIndicator(

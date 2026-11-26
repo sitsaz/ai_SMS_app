@@ -14,15 +14,18 @@ interface SmsDao {
         SELECT s.id, s.threadId, s.address, s.normalizedAddress, s.contactName,
                s.body, s.timestamp, s.isOutgoing, s.deliveryStatus,
                (SELECT COUNT(*) FROM sms_messages u
-                WHERE u.threadId = s.threadId AND u.isRead = 0 AND u.isOutgoing = 0) AS unreadCount
+                WHERE u.threadId = s.threadId AND u.isRead = 0 AND u.isOutgoing = 0) AS unreadCount,
+               CASE WHEN pt.threadId IS NOT NULL THEN 1 ELSE 0 END AS isPinned,
+               COALESCE(pt.pinnedAt, 0) AS pinnedAt
         FROM sms_messages s
         INNER JOIN (
             SELECT threadId, MAX(timestamp) AS maxTs
             FROM sms_messages
             GROUP BY threadId
         ) latest ON s.threadId = latest.threadId AND s.timestamp = latest.maxTs
+        LEFT JOIN pinned_threads pt ON s.threadId = pt.threadId
         GROUP BY s.threadId
-        ORDER BY s.timestamp DESC
+        ORDER BY isPinned DESC, pinnedAt DESC, s.timestamp DESC
         """
     )
     fun observeConversations(): Flow<List<ConversationRow>>
@@ -110,6 +113,31 @@ interface SmsDao {
 
     @Query("SELECT threadId FROM sms_messages WHERE normalizedAddress = :normalizedAddress ORDER BY timestamp DESC LIMIT 1")
     suspend fun findThreadIdByNormalizedAddress(normalizedAddress: String): Long?
+
+    @Query(
+        """
+        SELECT * FROM sms_messages
+        WHERE threadId = :threadId
+        ORDER BY timestamp DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getThreadMessagesForAi(threadId: Long, limit: Int): List<SmsMessage>
+
+    @Query("UPDATE sms_messages SET isPinned = :pinned, pinnedAt = :pinnedAt WHERE id = :id")
+    suspend fun setMessagePinned(id: Long, pinned: Boolean, pinnedAt: Long)
+
+    @Query("SELECT * FROM sms_messages WHERE threadId = :threadId AND isPinned = 1 ORDER BY pinnedAt DESC, timestamp DESC")
+    fun observePinnedMessagesInThread(threadId: Long): Flow<List<SmsMessage>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun pinThread(pinnedThread: PinnedThreadEntity)
+
+    @Query("DELETE FROM pinned_threads WHERE threadId = :threadId")
+    suspend fun unpinThread(threadId: Long)
+
+    @Query("SELECT COUNT(*) FROM pinned_threads WHERE threadId = :threadId")
+    suspend fun isThreadPinned(threadId: Long): Int
 }
 
 @Dao
@@ -149,6 +177,22 @@ interface NotificationDao {
         """
     )
     suspend fun getNotificationsInRange(startMs: Long, endMs: Long, limit: Int): List<NotificationItem>
+
+    @Query(
+        """
+        SELECT * FROM notification_items
+        WHERE packageName = :packageName
+          AND timestamp >= :startMs AND timestamp <= :endMs
+        ORDER BY timestamp DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getNotificationsByPackageInRange(
+        packageName: String,
+        startMs: Long,
+        endMs: Long,
+        limit: Int
+    ): List<NotificationItem>
 
     @Query("SELECT COUNT(*) FROM notification_items WHERE timestamp >= :startMs AND timestamp <= :endMs")
     suspend fun countNotificationsInRange(startMs: Long, endMs: Long): Int
@@ -201,9 +245,57 @@ interface AiTopicDao {
     @Query("SELECT * FROM ai_chat_messages WHERE topicId = :topicId ORDER BY timestamp ASC, id ASC")
     fun observeMessagesForTopic(topicId: Long): Flow<List<AiChatMessageEntity>>
 
+    @Query("SELECT * FROM ai_chat_messages ORDER BY timestamp ASC, id ASC")
+    fun observeAllChatMessages(): Flow<List<AiChatMessageEntity>>
+
     @Query("SELECT * FROM ai_chat_messages WHERE topicId = :topicId ORDER BY timestamp ASC, id ASC")
     suspend fun getMessagesForTopicOnce(topicId: Long): List<AiChatMessageEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertChatMessage(message: AiChatMessageEntity): Long
+}
+
+@Dao
+interface SearchHistoryDao {
+    @Query("SELECT * FROM search_history ORDER BY timestamp DESC")
+    fun observeAll(): Flow<List<SearchHistoryEntity>>
+
+    @Query("SELECT * FROM search_history ORDER BY timestamp DESC LIMIT :limit")
+    fun observeRecent(limit: Int = 20): Flow<List<SearchHistoryEntity>>
+
+    @Query("SELECT * FROM search_history WHERE id = :id LIMIT 1")
+    suspend fun getById(id: Long): SearchHistoryEntity?
+
+    @Query(
+        """
+        SELECT * FROM search_history
+        WHERE query = :query
+          AND origin = :origin
+          AND sourceFilter = :sourceFilter
+          AND directionFilter = :directionFilter
+          AND sortOrder = :sortOrder
+          AND dateStartMs = :dateStartMs
+          AND dateEndMs = :dateEndMs
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """
+    )
+    suspend fun findMatchingEntry(
+        query: String,
+        origin: String,
+        sourceFilter: String,
+        directionFilter: String,
+        sortOrder: String,
+        dateStartMs: Long,
+        dateEndMs: Long
+    ): SearchHistoryEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entry: SearchHistoryEntity): Long
+
+    @Query("DELETE FROM search_history WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
+    @Query("DELETE FROM search_history")
+    suspend fun clearAll()
 }

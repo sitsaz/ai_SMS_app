@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,12 +18,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -30,6 +37,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -46,9 +54,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.core.links.LinkExtractor
+import com.example.core.links.LiveNotificationIntentCache
 import com.example.core.localization.DateUtils
 import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
@@ -65,13 +80,18 @@ fun NotificationsScreen(
     onOpenListenerSettings: () -> Unit,
     onOpenAppSettings: () -> Unit,
     onDeleteNotification: (Long) -> Unit,
-    onClearAll: () -> Unit
+    onClearAll: () -> Unit,
+    onAskAiAboutNotifications: () -> Unit = {}
 ) {
     val strings = LocalStrings.current
     val isPersian = LocalIsPersian.current
     val calendarMode = LocalCalendarMode.current
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+
     var filterQuery by remember { mutableStateOf("") }
     var showClearDialog by remember { mutableStateOf(false) }
+    var copiedKey by remember { mutableStateOf<String?>(null) }
 
     val filtered = remember(notifications, filterQuery) {
         val q = filterQuery.trim().lowercase()
@@ -80,7 +100,8 @@ fun NotificationsScreen(
             it.appName.lowercase().contains(q) ||
                 it.senderOrTitle.lowercase().contains(q) ||
                 it.body.lowercase().contains(q) ||
-                it.subText.lowercase().contains(q)
+                it.subText.lowercase().contains(q) ||
+                it.extractedUrls.lowercase().contains(q)
         }
     }
 
@@ -95,6 +116,12 @@ fun NotificationsScreen(
                     )
                 },
                 actions = {
+                    IconButton(
+                        onClick = onAskAiAboutNotifications,
+                        modifier = Modifier.testTag("notifications_ask_ai_button")
+                    ) {
+                        Icon(Icons.Default.AutoAwesome, contentDescription = strings.askAiAboutNotifications)
+                    }
                     if (notifications.isNotEmpty()) {
                         IconButton(
                             onClick = { showClearDialog = true },
@@ -244,8 +271,33 @@ fun NotificationsScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(filtered, key = { it.id }) { notif ->
+                        val fullText = if (notif.subText.isNotBlank()) {
+                            "${notif.body}\n(${notif.subText})"
+                        } else {
+                            notif.body
+                        }
+                        val copyPayload = buildString {
+                            append(notif.senderOrTitle)
+                            if (fullText.isNotBlank()) {
+                                append('\n').append(fullText)
+                            }
+                        }
+                        val extractedLinks = remember(notif.id, notif.extractedUrls, notif.body, notif.senderOrTitle, notif.subText) {
+                            LinkExtractor.parseSerializedUrls(
+                                notif.extractedUrls,
+                                notif.senderOrTitle,
+                                notif.body,
+                                notif.subText
+                            )
+                        }
+                        val hasLiveIntent = remember(notif.notificationKey) {
+                            LiveNotificationIntentCache.hasIntent(notif.notificationKey)
+                        }
+
                         Card(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("notification_card_${notif.id}"),
                             shape = RoundedCornerShape(16.dp),
                             colors = CardDefaults.cardColors(
                                 containerColor = MaterialTheme.colorScheme.surfaceContainerLow
@@ -273,6 +325,20 @@ fun NotificationsScreen(
                                             color = MaterialTheme.colorScheme.secondary
                                         )
                                     }
+                                    IconButton(
+                                        onClick = {
+                                            clipboard.setText(AnnotatedString(copyPayload))
+                                            copiedKey = "notif_${notif.id}"
+                                        },
+                                        modifier = Modifier.testTag("copy_notification_${notif.id}")
+                                    ) {
+                                        Icon(
+                                            imageVector = if (copiedKey == "notif_${notif.id}") Icons.Default.Check else Icons.Default.ContentCopy,
+                                            contentDescription = strings.copyMessage,
+                                            tint = if (copiedKey == "notif_${notif.id}") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
                                     IconButton(onClick = { onDeleteNotification(notif.id) }) {
                                         Icon(
                                             Icons.Default.DeleteOutline,
@@ -281,17 +347,106 @@ fun NotificationsScreen(
                                         )
                                     }
                                 }
+
                                 Spacer(Modifier.height(8.dp))
-                                Text(
-                                    text = if (notif.subText.isNotBlank()) "${notif.body}\n(${notif.subText})" else notif.body,
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
+
+                                SelectionContainer {
+                                    Text(
+                                        text = fullText,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                }
+
                                 Spacer(Modifier.height(8.dp))
-                                Text(
-                                    text = DateUtils.formatDateTime(notif.timestamp, calendarMode, usePersianDigits = isPersian),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = DateUtils.formatDateTime(notif.timestamp, calendarMode, usePersianDigits = isPersian),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    if (hasLiveIntent) {
+                                        TextButton(
+                                            onClick = { LiveNotificationIntentCache.launch(notif.notificationKey) },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            modifier = Modifier.testTag("open_live_notif_${notif.id}")
+                                        ) {
+                                            Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(14.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(strings.openNotificationApp, style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    }
+                                }
+
+                                if (extractedLinks.isNotEmpty()) {
+                                    Spacer(Modifier.height(8.dp))
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        text = strings.linksLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Spacer(Modifier.height(6.dp))
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        extractedLinks.forEachIndexed { idx, link ->
+                                            val linkCopiedId = "link_${notif.id}_$idx"
+                                            Surface(
+                                                shape = RoundedCornerShape(10.dp),
+                                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable { LinkExtractor.openUrlSafely(context, link) }
+                                                    .testTag("notification_link_${notif.id}_$idx")
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Link,
+                                                        contentDescription = strings.openLink,
+                                                        tint = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                    Text(
+                                                        text = link,
+                                                        style = MaterialTheme.typography.bodySmall.copy(
+                                                            color = MaterialTheme.colorScheme.primary,
+                                                            textDecoration = TextDecoration.Underline
+                                                        ),
+                                                        maxLines = 2,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.weight(1f)
+                                                    )
+                                                    IconButton(
+                                                        onClick = {
+                                                            clipboard.setText(AnnotatedString(link))
+                                                            copiedKey = linkCopiedId
+                                                        },
+                                                        modifier = Modifier
+                                                            .size(30.dp)
+                                                            .testTag("copy_notification_link_${notif.id}_$idx")
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = if (copiedKey == linkCopiedId) Icons.Default.Check else Icons.Default.ContentCopy,
+                                                            contentDescription = strings.copyLink,
+                                                            tint = if (copiedKey == linkCopiedId) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                            modifier = Modifier.size(15.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

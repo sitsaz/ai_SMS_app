@@ -6,6 +6,8 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
 import com.example.AiSmsApplication
+import com.example.core.links.LinkExtractor
+import com.example.core.links.LiveNotificationIntentCache
 import com.example.data.local.NotificationItem
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +44,13 @@ class NotificationArchiveService : NotificationListenerService() {
         val timestamp = sbn.postTime.takeIf { it > 0L } ?: System.currentTimeMillis()
         val key = sbn.key ?: "$pkg:${sbn.id}"
 
+        val extractedUrlsList = LinkExtractor.extractUrlsFromNotification(
+            notification = notification,
+            fallbackTexts = arrayOf(title, bigText, text, subText)
+        )
+        val serializedUrls = LinkExtractor.serializeUrls(extractedUrlsList)
+        LiveNotificationIntentCache.put(key, notification.contentIntent)
+
         val app = applicationContext as? AiSmsApplication ?: return
         serviceScope.launch {
             try {
@@ -58,6 +67,7 @@ class NotificationArchiveService : NotificationListenerService() {
                         senderOrTitle = senderOrTitle,
                         body = body.ifBlank { senderOrTitle },
                         subText = subText,
+                        extractedUrls = serializedUrls,
                         timestamp = timestamp,
                         isRead = false
                     )

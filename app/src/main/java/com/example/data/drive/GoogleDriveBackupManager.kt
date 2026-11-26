@@ -38,7 +38,9 @@ data class BackupSmsRecord(
     val timestamp: Long,
     val isOutgoing: Boolean,
     val deliveryStatus: String = "NONE",
-    val isRead: Boolean = true
+    val isRead: Boolean = true,
+    val isPinned: Boolean = false,
+    val pinnedAt: Long = 0L
 )
 
 @Serializable
@@ -51,6 +53,7 @@ data class BackupNotificationRecord(
     val senderOrTitle: String,
     val body: String,
     val subText: String = "",
+    val extractedUrls: String = "",
     val timestamp: Long,
     val isRead: Boolean = false
 )
@@ -310,7 +313,9 @@ class GoogleDriveBackupManager(
                             timestamp = rec.timestamp,
                             isOutgoing = rec.isOutgoing,
                             deliveryStatus = rec.deliveryStatus,
-                            isRead = rec.isRead
+                            isRead = rec.isRead,
+                            isPinned = rec.isPinned,
+                            pinnedAt = rec.pinnedAt
                         )
                     )
                     if (insertedId > 0L) restoredSms++ else skippedDuplicates++
@@ -339,6 +344,7 @@ class GoogleDriveBackupManager(
                             senderOrTitle = rec.senderOrTitle,
                             body = rec.body,
                             subText = rec.subText,
+                            extractedUrls = rec.extractedUrls,
                             timestamp = rec.timestamp,
                             isRead = rec.isRead
                         )
@@ -442,7 +448,9 @@ class GoogleDriveBackupManager(
         timestamp = timestamp,
         isOutgoing = isOutgoing,
         deliveryStatus = deliveryStatus,
-        isRead = isRead
+        isRead = isRead,
+        isPinned = isPinned,
+        pinnedAt = pinnedAt
     )
 
     private fun NotificationItem.toBackupRecord(): BackupNotificationRecord = BackupNotificationRecord(
@@ -454,6 +462,7 @@ class GoogleDriveBackupManager(
         senderOrTitle = senderOrTitle,
         body = body,
         subText = subText,
+        extractedUrls = extractedUrls,
         timestamp = timestamp,
         isRead = isRead
     )

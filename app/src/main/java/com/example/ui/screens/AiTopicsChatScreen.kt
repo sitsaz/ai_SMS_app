@@ -23,12 +23,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Settings
@@ -59,7 +62,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -74,6 +79,7 @@ import com.example.data.local.AiTopicEntity
 import com.example.data.local.ArchiveRangePreset
 import com.example.data.search.SearchResultItem
 import com.example.ui.components.BilingualDateRangeDialog
+import com.example.ui.components.MarkdownText
 import com.example.ui.components.SearchResultCard
 import com.example.ui.components.XmlPreviewDialog
 import com.example.ui.viewmodel.AiChatDisplayMessage
@@ -109,7 +115,9 @@ fun AiTopicsChatPane(
     val strings = LocalStrings.current
     val isPersian = LocalIsPersian.current
     val calendarMode = LocalCalendarMode.current
+    val clipboard = LocalClipboardManager.current
     var promptText by remember { mutableStateOf("") }
+    var copiedMsgId by remember { mutableStateOf<Long?>(null) }
     val listState = rememberLazyListState()
 
     LaunchedEffect(chatMessages.size, isAiSending) {
@@ -340,45 +348,90 @@ fun AiTopicsChatPane(
                                                 .fillMaxWidth()
                                                 .padding(bottom = 8.dp)
                                         ) {
+                                            SelectionContainer {
+                                                Text(
+                                                    text = "${strings.aiSummaryLabel}: ${item.parsedResponse.summary}",
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    val bubbleTextColor = when {
+                                        msg.isError -> MaterialTheme.colorScheme.onErrorContainer
+                                        isUser -> MaterialTheme.colorScheme.onPrimaryContainer
+                                        else -> MaterialTheme.colorScheme.onSurface
+                                    }
+                                    if (!isUser && !msg.isError) {
+                                        MarkdownText(
+                                            markdown = msg.text,
+                                            textColor = bubbleTextColor,
+                                            baseStyle = MaterialTheme.typography.bodyMedium
+                                        )
+                                    } else {
+                                        SelectionContainer {
                                             Text(
-                                                text = "${strings.aiSummaryLabel}: ${item.parsedResponse.summary}",
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                                text = msg.text,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = bubbleTextColor
                                             )
                                         }
                                     }
-                                    Text(
-                                        text = msg.text,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = when {
-                                            msg.isError -> MaterialTheme.colorScheme.onErrorContainer
-                                            isUser -> MaterialTheme.colorScheme.onPrimaryContainer
-                                            else -> MaterialTheme.colorScheme.onSurface
-                                        }
-                                    )
-                                    if (msg.xmlSummaryLabel.isNotBlank()) {
-                                        Spacer(Modifier.height(8.dp))
-                                        AssistChip(
-                                            onClick = {
-                                                if (msg.xmlContent.isNotBlank()) {
-                                                    onShowExistingXml(
-                                                        msg.xmlContent,
-                                                        msg.xmlSummaryLabel,
-                                                        msg.xmlContent.toByteArray(Charsets.UTF_8).size
+                                    Spacer(Modifier.height(6.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        if (msg.xmlSummaryLabel.isNotBlank()) {
+                                            AssistChip(
+                                                onClick = {
+                                                    if (msg.xmlContent.isNotBlank()) {
+                                                        onShowExistingXml(
+                                                            msg.xmlContent,
+                                                            msg.xmlSummaryLabel,
+                                                            msg.xmlContent.toByteArray(Charsets.UTF_8).size
+                                                        )
+                                                    }
+                                                },
+                                                leadingIcon = {
+                                                    Icon(Icons.Default.Code, contentDescription = null, modifier = Modifier.size(14.dp))
+                                                },
+                                                label = {
+                                                    Text(
+                                                        text = msg.xmlSummaryLabel,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
                                                     )
+                                                },
+                                                modifier = Modifier.weight(1f, fill = false)
+                                            )
+                                        } else {
+                                            Spacer(Modifier.width(1.dp))
+                                        }
+                                        IconButton(
+                                            onClick = {
+                                                val fullCopy = if (!isUser && !msg.isError && item.parsedResponse?.summary?.isNotBlank() == true) {
+                                                    "${item.parsedResponse.summary}\n\n${msg.text}"
+                                                } else {
+                                                    msg.text
                                                 }
+                                                clipboard.setText(AnnotatedString(fullCopy))
+                                                copiedMsgId = msg.id
                                             },
-                                            leadingIcon = {
-                                                Icon(Icons.Default.Code, contentDescription = null, modifier = Modifier.size(14.dp))
-                                            },
-                                            label = {
-                                                Text(
-                                                    text = msg.xmlSummaryLabel,
-                                                    style = MaterialTheme.typography.labelSmall
-                                                )
-                                            }
-                                        )
+                                            modifier = Modifier
+                                                .size(28.dp)
+                                                .testTag("copy_ai_topic_msg_${msg.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = if (copiedMsgId == msg.id) Icons.Default.Check else Icons.Default.ContentCopy,
+                                                contentDescription = strings.copyMessage,
+                                                tint = bubbleTextColor.copy(alpha = 0.72f),
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -618,7 +671,7 @@ private fun ArchiveHistoryPromptSheet(
 
             Text(strings.aiContextModeLabel, style = MaterialTheme.typography.titleSmall)
             Text(
-                text = strings.contextNoUploadHint,
+                text = if (draft.contextMode == AiContextMode.SMART_AUTO) strings.contextSmartAutoDesc else strings.contextNoUploadHint,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -627,6 +680,7 @@ private fun ArchiveHistoryPromptSheet(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 listOf(
+                    AiContextMode.SMART_AUTO to strings.contextSmartAuto,
                     AiContextMode.COMPACT_TEXT to strings.contextCompactText,
                     AiContextMode.KEYWORD_PREFILTER to strings.contextKeywordPrefilter,
                     AiContextMode.INLINE_XML to strings.contextInlineXml
@@ -727,6 +781,7 @@ private fun ArchiveHistoryPromptSheet(
 }
 
 private fun contextModeLabel(mode: AiContextMode, strings: AppStrings): String = when (mode) {
+    AiContextMode.SMART_AUTO -> strings.contextSmartAuto
     AiContextMode.COMPACT_TEXT -> strings.contextCompactText
     AiContextMode.KEYWORD_PREFILTER -> strings.contextKeywordPrefilter
     AiContextMode.INLINE_XML -> strings.contextInlineXml

@@ -1,6 +1,11 @@
 package com.example
 
+import android.accounts.AccountManager
+import android.app.Activity
 import android.content.Intent
+import android.media.RingtoneManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -8,6 +13,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.example.data.drive.GoogleDriveAuthHelper
+import com.example.data.drive.PkceSession
 import com.google.android.gms.auth.api.identity.Identity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -16,10 +23,12 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sms
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
@@ -68,17 +77,20 @@ import com.example.data.search.ArchiveItemSource
 import com.example.data.search.SearchResultItem
 import com.example.ui.components.SmsPermissionRationaleDialog
 import com.example.ui.components.SmsPermissionSettingsDialog
+import com.example.ui.navigation.AIChatRoute
 import com.example.ui.navigation.MessagesRoute
 import com.example.ui.navigation.NotificationsRoute
 import com.example.ui.navigation.SearchRoute
 import com.example.ui.navigation.SettingsRoute
 import com.example.ui.navigation.ThreadRoute
+import com.example.ui.screens.AIChatScreen
 import com.example.ui.screens.MessagesScreen
 import com.example.ui.screens.NotificationsScreen
 import com.example.ui.screens.SearchAndAiScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.ThreadScreen
 import com.example.ui.theme.AiSmsManagerTheme
+import com.example.ui.viewmodel.AiChatViewModel
 import com.example.ui.viewmodel.MainViewModel
 import com.example.ui.viewmodel.SearchAndAiViewModel
 import com.example.ui.viewmodel.SettingsViewModel
@@ -134,6 +146,7 @@ private fun AiSmsManagerRoot(
 ) {
     val mainVm: MainViewModel = viewModel()
     val searchAiVm: SearchAndAiViewModel = viewModel()
+    val aiChatVm: AiChatViewModel = viewModel()
     val navController = rememberNavController()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -166,11 +179,21 @@ private fun AiSmsManagerRoot(
     val scopeDraft by searchAiVm.scopeDraft.collectAsStateWithLifecycle()
     val draftCounts by searchAiVm.draftCounts.collectAsStateWithLifecycle()
     val xmlPreview by searchAiVm.xmlPreview.collectAsStateWithLifecycle()
+    val recentSearches by searchAiVm.recentSearches.collectAsStateWithLifecycle()
+    val searchHistory by searchAiVm.searchHistory.collectAsStateWithLifecycle()
+    val aiChatArchive by searchAiVm.aiChatArchive.collectAsStateWithLifecycle()
+    val selectedArchivedSearch by searchAiVm.selectedArchivedSearch.collectAsStateWithLifecycle()
+    val selectedArchivedAiChat by searchAiVm.selectedArchivedAiChat.collectAsStateWithLifecycle()
+    val searchSavedTick by searchAiVm.searchSavedTick.collectAsStateWithLifecycle()
+
+    val showDefaultSmsBanner by mainVm.shouldShowDefaultSmsBanner.collectAsStateWithLifecycle()
 
     var selectedNotificationDetail by remember { mutableStateOf<SearchResultItem?>(null) }
     var showSmsRationaleDialog by remember { mutableStateOf(false) }
     var showSmsSettingsDialog by remember { mutableStateOf(false) }
     var hasPromptedSmsPermissionsOnce by remember { mutableStateOf(false) }
+    var pendingPkceSession by remember { mutableStateOf<PkceSession?>(null) }
+    var pendingFallbackAccountEmail by remember { mutableStateOf<String?>(null) }
     val activity = remember(context) { AndroidCompat.findActivity(context) }
 
     val permissionsLauncher = rememberLauncherForActivityResult(
@@ -194,6 +217,74 @@ private fun AiSmsManagerRoot(
         mainVm.syncAllIfPermitted()
     }
 
+    val ringtonePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { res ->
+        if (res.resultCode == Activity.RESULT_OK) {
+            val data = res.data
+            val pickedUri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI, Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+            }
+            if (pickedUri == null) {
+                settingsVm.setSmsRingtone(AndroidCompat.RINGTONE_SILENT_VALUE, strings.ringtoneSilent)
+                AndroidCompat.ensureSmsNotificationChannel(
+                    context = context,
+                    title = strings.tabMessages,
+                    channelVersion = settings.notificationChannelVersion + 1,
+                    ringtoneUriString = AndroidCompat.RINGTONE_SILENT_VALUE,
+                    vibrate = settings.notificationVibrate
+                )
+            } else {
+                val uriStr = pickedUri.toString()
+                val title = AndroidCompat.resolveRingtoneTitle(context, uriStr, isPersian)
+                settingsVm.setSmsRingtone(uriStr, title)
+                AndroidCompat.ensureSmsNotificationChannel(
+                    context = context,
+                    title = strings.tabMessages,
+                    channelVersion = settings.notificationChannelVersion + 1,
+                    ringtoneUriString = uriStr,
+                    vibrate = settings.notificationVibrate
+                )
+            }
+        }
+    }
+
+    val driveRecoverLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { res ->
+        val email = pendingFallbackAccountEmail
+        if (res.resultCode == Activity.RESULT_OK && !email.isNullOrBlank()) {
+            settingsVm.connectDriveWithGoogleAccount(email, isPersian) {
+                settingsVm.onDriveAuthFailed(
+                    if (isPersian) "تایید مجدد Google Drive تکمیل نشد." else "Google Drive consent incomplete."
+                )
+            }
+        } else if (res.resultCode != Activity.RESULT_OK) {
+            settingsVm.onDriveAuthFailed(
+                if (isPersian) "تایید دسترسی Google Drive لغو شد." else "Google Drive authorization cancelled."
+            )
+        }
+    }
+
+    val driveAccountPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { res ->
+        if (res.resultCode == Activity.RESULT_OK) {
+            val email = res.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)?.trim().orEmpty()
+            if (email.isNotBlank()) {
+                pendingFallbackAccountEmail = email
+                settingsVm.connectDriveWithGoogleAccount(email, isPersian) { recoverIntent ->
+                    driveRecoverLauncher.launch(recoverIntent)
+                }
+            }
+        } else {
+            settingsVm.setDriveTroubleshootingVisible(true)
+        }
+    }
+
     val driveAuthLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { activityResult ->
@@ -209,9 +300,13 @@ private fun AiSmsManagerRoot(
                 )
             }
         } catch (e: Exception) {
-            settingsVm.onDriveAuthFailed(
-                e.localizedMessage ?: if (isPersian) "ورود به Google Drive لغو شد." else "Google Drive sign-in cancelled."
-            )
+            settingsVm.onDriveAuthException(e, isPersian)
+            val (_, isConfigErr) = GoogleDriveAuthHelper.describeDriveAuthException(context, e, isPersian)
+            if (isConfigErr) {
+                driveAccountPickerLauncher.launch(
+                    GoogleDriveAuthHelper.createGoogleAccountPickerIntent(driveState.accountEmail)
+                )
+            }
         }
     }
 
@@ -240,9 +335,13 @@ private fun AiSmsManagerRoot(
                     }
                 }
                 .addOnFailureListener { e ->
-                    settingsVm.onDriveAuthFailed(
-                        e.localizedMessage ?: if (isPersian) "خطا در اتصال به Google Drive" else "Google Drive authorization failed"
-                    )
+                    settingsVm.onDriveAuthException(e, isPersian)
+                    val (_, isConfigErr) = GoogleDriveAuthHelper.describeDriveAuthException(context, e, isPersian)
+                    if (isConfigErr) {
+                        driveAccountPickerLauncher.launch(
+                            GoogleDriveAuthHelper.createGoogleAccountPickerIntent(driveState.accountEmail)
+                        )
+                    }
                 }
         }
     }
@@ -297,15 +396,31 @@ private fun AiSmsManagerRoot(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 mainVm.refreshSystemStatuses()
+                settingsVm.triggerAutoBackupIfDue()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Handle external sms:/smsto: or notification click intents
+    // Handle external sms:/smsto:, OAuth PKCE redirect, or notification click intents
     LaunchedEffect(pendingIntent) {
         val intent = pendingIntent ?: return@LaunchedEffect
+        val dataUri = intent.data
+        if (intent.action == Intent.ACTION_VIEW &&
+            dataUri != null &&
+            dataUri.scheme == context.packageName &&
+            dataUri.path == "/oauth2redirect"
+        ) {
+            val session = pendingPkceSession
+            if (session != null) {
+                settingsVm.completeBrowserPkce(session, dataUri.toString(), isPersian)
+                pendingPkceSession = null
+            }
+            onConsumeIntent()
+            return@LaunchedEffect
+        }
+
         val threadIdExtra = intent.getLongExtra(MainActivity.EXTRA_OPEN_THREAD_ID, -1L)
         val addressExtra = intent.getStringExtra(MainActivity.EXTRA_OPEN_ADDRESS)
         val msgIdExtra = intent.getLongExtra(MainActivity.EXTRA_OPEN_MESSAGE_ID, -1L)
@@ -321,6 +436,22 @@ private fun AiSmsManagerRoot(
             }
             onConsumeIntent()
         }
+    }
+
+    val launchRingtonePicker = {
+        val existingUri: Uri? = when {
+            settings.smsRingtoneUri == AndroidCompat.RINGTONE_SILENT_VALUE -> null
+            settings.smsRingtoneUri.isNotBlank() -> runCatching { Uri.parse(settings.smsRingtoneUri) }.getOrNull()
+            else -> RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+        }
+        val pickerIntent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+            putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_NOTIFICATION)
+            putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, strings.smsRingtoneLabel)
+            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
+            putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, existingUri)
+        }
+        ringtonePickerLauncher.launch(pickerIntent)
     }
 
     val launchSystemPermissionPrompt = {
@@ -393,14 +524,17 @@ private fun AiSmsManagerRoot(
                         conversations = conversations,
                         contacts = contacts,
                         systemStatus = systemStatus,
+                        showDefaultSmsBanner = showDefaultSmsBanner,
                         isSyncing = isSyncing,
                         isSearchExpanded = isSmsSearchExpanded,
                         searchQuery = smsSearchQuery,
                         searchResults = smsSearchResults,
                         onSearchExpandedChange = mainVm::setSmsSearchExpanded,
                         onSearchQueryChange = mainVm::updateSmsSearchQuery,
+                        onSearchSubmit = mainVm::saveCurrentSmsSearchToArchive,
                         onRequestPermissions = requestAllNeededPermissions,
                         onRequestDefaultSms = requestDefaultSmsRole,
+                        onDismissDefaultSmsBanner = mainVm::dismissDefaultSmsBannerToday,
                         onSyncSms = { mainVm.syncAllIfPermitted() },
                         onOpenThread = { threadId, address, targetMsgId ->
                             navController.navigate(ThreadRoute(threadId, address, targetMsgId))
@@ -411,6 +545,7 @@ private fun AiSmsManagerRoot(
                                 navController.navigate(ThreadRoute(tid, address, -1L))
                             }
                         },
+                        onTogglePinThread = mainVm::setThreadPinned,
                         onDeleteThread = { mainVm.deleteThread(it) }
                     )
                 }
@@ -419,6 +554,12 @@ private fun AiSmsManagerRoot(
                     SearchAndAiScreen(
                         filterState = filterState,
                         localResults = localResults,
+                        recentSearches = recentSearches,
+                        searchHistory = searchHistory,
+                        aiChatArchive = aiChatArchive,
+                        selectedArchivedSearch = selectedArchivedSearch,
+                        selectedArchivedAiChat = selectedArchivedAiChat,
+                        searchSavedTick = searchSavedTick,
                         isAiConfigured = settings.isAiConfigured,
                         topics = topics,
                         activeTopicId = activeTopicId,
@@ -436,6 +577,17 @@ private fun AiSmsManagerRoot(
                         onDirectionChange = searchAiVm::updateDirectionFilter,
                         onDateRangeChange = searchAiVm::updateLocalDateRange,
                         onClearDateRange = searchAiVm::clearLocalDateRange,
+                        onSaveSearchNow = { searchAiVm.saveCurrentSearchNow() },
+                        onOpenArchivedSearch = searchAiVm::openArchivedSearch,
+                        onDismissArchivedSearch = searchAiVm::dismissArchivedSearch,
+                        onRerunArchivedSearch = searchAiVm::rerunArchivedSearch,
+                        onDeleteArchivedSearch = searchAiVm::deleteArchivedSearch,
+                        onClearSearchHistory = searchAiVm::clearSearchHistory,
+                        onOpenArchivedAiChat = searchAiVm::openArchivedAiChat,
+                        onDismissArchivedAiChat = searchAiVm::dismissArchivedAiChat,
+                        onOpenTopicInAiChatScreen = { topicId ->
+                            navController.navigate(AIChatRoute(topicId = topicId))
+                        },
                         onSelectTopic = searchAiVm::selectTopic,
                         onNewTopic = searchAiVm::startNewTopic,
                         onDeleteTopic = searchAiVm::deleteTopic,
@@ -460,7 +612,62 @@ private fun AiSmsManagerRoot(
                         onOpenListenerSettings = openNotificationAccessSettings,
                         onOpenAppSettings = { navigateTopTab(SettingsRoute) },
                         onDeleteNotification = mainVm::deleteNotification,
-                        onClearAll = mainVm::clearAllNotifications
+                        onClearAll = mainVm::clearAllNotifications,
+                        onAskAiAboutNotifications = {
+                            navController.navigate(AIChatRoute(source = "NOTIFICATIONS", threadId = -1L))
+                        }
+                    )
+                }
+
+                composable<AIChatRoute> { backStack ->
+                    val route = backStack.toRoute<AIChatRoute>()
+                    LaunchedEffect(route.source, route.threadId, route.topicId) {
+                        if (route.topicId > 0L || route.source.isNotBlank() || route.threadId > 0L) {
+                            aiChatVm.applyInitialRouteContext(route.source, route.threadId, route.topicId)
+                        }
+                    }
+
+                    val aiContextConfig by aiChatVm.contextConfig.collectAsStateWithLifecycle()
+                    val aiConversations by aiChatVm.conversations.collectAsStateWithLifecycle()
+                    val aiNotifApps by aiChatVm.notificationApps.collectAsStateWithLifecycle()
+                    val aiNotifCount by aiChatVm.totalNotificationCount.collectAsStateWithLifecycle()
+                    val aiMessages by aiChatVm.messages.collectAsStateWithLifecycle()
+                    val aiArchivedSessions by aiChatVm.archivedSessions.collectAsStateWithLifecycle()
+                    val aiActiveTopicId by aiChatVm.activeSessionTopicId.collectAsStateWithLifecycle()
+                    val aiSending by aiChatVm.isSending.collectAsStateWithLifecycle()
+                    val aiXmlPreview by aiChatVm.xmlPreview.collectAsStateWithLifecycle()
+
+                    AIChatScreen(
+                        isAiConfigured = settings.isAiConfigured,
+                        aiContextLimitTokens = settings.aiContextLimitTokens,
+                        aiSupportsFileUpload = settings.aiSupportsFileUpload,
+                        contextConfig = aiContextConfig,
+                        conversations = aiConversations,
+                        notificationApps = aiNotifApps,
+                        totalNotificationCount = aiNotifCount,
+                        messages = aiMessages,
+                        archivedSessions = aiArchivedSessions,
+                        activeTopicId = aiActiveTopicId,
+                        isSending = aiSending,
+                        xmlPreview = aiXmlPreview,
+                        onSelectSource = aiChatVm::selectSource,
+                        onSelectThread = aiChatVm::selectThread,
+                        onSelectNotificationApp = aiChatVm::selectNotificationApp,
+                        onSelectRangePreset = aiChatVm::selectRangePreset,
+                        onToggleSmartContext = aiChatVm::toggleSmartContext,
+                        onNewChat = aiChatVm::startNewSession,
+                        onLoadArchivedSession = aiChatVm::loadArchivedSession,
+                        onDeleteArchivedSession = aiChatVm::deleteArchivedSession,
+                        onPreviewCurrentXml = { q ->
+                            aiChatVm.previewCurrentXmlPrompt(q, isPersian, strings)
+                        },
+                        onShowStoredXml = aiChatVm::showStoredXml,
+                        onDismissXmlPreview = aiChatVm::dismissXmlPreview,
+                        onSendMessage = { q ->
+                            aiChatVm.sendMessage(q, isPersian, strings)
+                        },
+                        onOpenSettings = { navigateTopTab(SettingsRoute) },
+                        onMatchedItemClick = onSearchItemClicked
                     )
                 }
 
@@ -471,23 +678,89 @@ private fun AiSmsManagerRoot(
                         testState = testState,
                         modelsState = modelsState,
                         driveState = driveState,
+                        apkPackageName = settingsVm.apkPackageName,
+                        apkSha1Fingerprint = settingsVm.apkSha1Fingerprint,
                         onLanguageChange = settingsVm::setLanguage,
                         onCalendarPreferenceChange = settingsVm::setCalendarPreference,
                         onThemeModeChange = settingsVm::setThemeMode,
                         onDynamicColorChange = settingsVm::setDynamicColor,
                         onCaptureNotificationsChange = settingsVm::setCaptureNotifications,
+                        onSmsNotificationsChange = settingsVm::setSmsNotificationsEnabled,
+                        onNotificationPreviewChange = settingsVm::setShowNotificationPreviewText,
+                        onNotificationVibrateChange = { enabled ->
+                            settingsVm.setNotificationVibrate(enabled)
+                            AndroidCompat.ensureSmsNotificationChannel(
+                                context = context,
+                                title = strings.tabMessages,
+                                channelVersion = settings.notificationChannelVersion + 1,
+                                ringtoneUriString = settings.smsRingtoneUri,
+                                vibrate = enabled
+                            )
+                        },
+                        onPickSmsRingtone = launchRingtonePicker,
+                        onOpenSmsChannelSettings = {
+                            AndroidCompat.ensureSmsNotificationChannel(
+                                context = context,
+                                title = strings.tabMessages,
+                                channelVersion = settings.notificationChannelVersion,
+                                ringtoneUriString = settings.smsRingtoneUri,
+                                vibrate = settings.notificationVibrate
+                            )
+                            context.startActivity(
+                                AndroidCompat.createSmsChannelSettingsIntent(
+                                    context,
+                                    settings.notificationChannelVersion
+                                )
+                            )
+                        },
                         onRequestDefaultSms = requestDefaultSmsRole,
                         onOpenNotificationListenerSettings = openNotificationAccessSettings,
                         onSaveAiConfig = settingsVm::saveAiConfig,
-                        onTestAiConnection = { p, u, m, k ->
-                            settingsVm.testAiConnection(p, u, m, k, isPersian)
+                        onTestAiConnection = { p, u, m, k, ctx ->
+                            settingsVm.testAiConnection(p, u, m, k, ctx, isPersian)
                         },
                         onFetchModels = { p, u, k ->
                             settingsVm.fetchModels(p, u, k, isPersian)
                         },
                         onClearAiConfig = settingsVm::clearAiConfig,
                         onBackupScopeChange = settingsVm::setBackupScope,
+                        onBackupSyncModeChange = settingsVm::setBackupSyncMode,
                         onConnectGoogleDrive = { connectGoogleDrive() },
+                        onConnectDriveFallbackAccount = {
+                            driveAccountPickerLauncher.launch(
+                                GoogleDriveAuthHelper.createGoogleAccountPickerIntent(driveState.accountEmail)
+                            )
+                        },
+                        onLaunchDriveBrowserPkce = { clientId ->
+                            val session = settingsVm.startBrowserPkceSession(clientId)
+                            if (session != null) {
+                                pendingPkceSession = session
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(session.authUrl)).apply {
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                    )
+                                }.onFailure { err ->
+                                    settingsVm.onDriveAuthFailed(err.localizedMessage ?: "Cannot launch browser")
+                                }
+                            }
+                        },
+                        onCompleteDriveBrowserPkce = { raw ->
+                            val session = pendingPkceSession
+                            if (session != null) {
+                                settingsVm.completeBrowserPkce(session, raw, isPersian)
+                                pendingPkceSession = null
+                            } else {
+                                settingsVm.onDriveAuthFailed(
+                                    if (isPersian) "ابتدا ورود از طریق مرورگر را آغاز کنید." else "Start browser login first."
+                                )
+                            }
+                        },
+                        onConnectDriveWithToken = { token ->
+                            settingsVm.connectWithManualAccessToken(token, isPersian)
+                        },
+                        onToggleDriveTroubleshooting = settingsVm::setDriveTroubleshootingVisible,
                         onDisconnectGoogleDrive = { settingsVm.disconnectDrive(isPersian) },
                         onRefreshDriveBackups = { settingsVm.refreshDriveBackups(isPersian) },
                         onBackupToGoogleDrive = { settingsVm.backupToGoogleDrive(isPersian) },
@@ -510,12 +783,15 @@ private fun AiSmsManagerRoot(
                     val route = backStack.toRoute<ThreadRoute>()
                     val threadMessages by mainVm.observeThreadMessages(route.threadId)
                         .collectAsStateWithLifecycle(initialValue = emptyList())
+                    val pinnedMessages by mainVm.observePinnedMessagesInThread(route.threadId)
+                        .collectAsStateWithLifecycle(initialValue = emptyList())
 
                     ThreadScreen(
                         threadId = route.threadId,
                         address = route.address,
                         targetMessageId = route.targetMessageId,
                         messages = threadMessages,
+                        pinnedMessages = pinnedMessages,
                         hasSendSmsPermission = systemStatus.hasSendSmsPermission,
                         onRequestSmsPermissions = requestAllNeededPermissions,
                         onBack = { navController.popBackStack() },
@@ -523,9 +799,15 @@ private fun AiSmsManagerRoot(
                         onSendSms = { text ->
                             mainVm.sendSms(route.threadId, route.address, text)
                         },
+                        onTogglePinMessage = { msg, pin ->
+                            mainVm.setMessagePinned(msg.id, pin)
+                        },
                         onDeleteMessage = mainVm::deleteMessage,
                         onSaveContact = { addr ->
                             context.startActivity(mainVm.buildSaveContactIntent(addr))
+                        },
+                        onAskAiAboutThread = {
+                            navController.navigate(AIChatRoute(source = "THREAD", threadId = route.threadId))
                         }
                     )
                 }
@@ -557,6 +839,17 @@ private fun AiSmsManagerRoot(
                                 )
                             },
                             label = { Text(strings.tabSearch) }
+                        )
+                        NavigationRailItem(
+                            selected = currentDest?.hasRoute<AIChatRoute>() == true,
+                            onClick = { navigateTopTab(AIChatRoute()) },
+                            icon = {
+                                Icon(
+                                    if (currentDest?.hasRoute<AIChatRoute>() == true) Icons.Filled.AutoAwesome else Icons.Outlined.AutoAwesome,
+                                    contentDescription = strings.tabAiChat
+                                )
+                            },
+                            label = { Text(strings.tabAiChat) }
                         )
                         NavigationRailItem(
                             selected = currentDest?.hasRoute<NotificationsRoute>() == true,
@@ -613,6 +906,18 @@ private fun AiSmsManagerRoot(
                                 },
                                 label = { Text(strings.tabSearch) },
                                 modifier = Modifier.testTag("nav_search_tab")
+                            )
+                            NavigationBarItem(
+                                selected = currentDest?.hasRoute<AIChatRoute>() == true,
+                                onClick = { navigateTopTab(AIChatRoute()) },
+                                icon = {
+                                    Icon(
+                                        if (currentDest?.hasRoute<AIChatRoute>() == true) Icons.Filled.AutoAwesome else Icons.Outlined.AutoAwesome,
+                                        contentDescription = strings.tabAiChat
+                                    )
+                                },
+                                label = { Text(strings.tabAiChat) },
+                                modifier = Modifier.testTag("nav_aichat_tab")
                             )
                             NavigationBarItem(
                                 selected = currentDest?.hasRoute<NotificationsRoute>() == true,

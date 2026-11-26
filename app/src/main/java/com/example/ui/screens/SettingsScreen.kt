@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.os.Build
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -15,26 +16,37 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.SettingsApplications
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -66,9 +78,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.BuildConfig
 import com.example.core.localization.AppLanguage
@@ -79,6 +94,7 @@ import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
 import com.example.data.ai.AiSearchClient
 import com.example.data.local.AiProviderType
+import com.example.data.local.BackupSyncMode
 import com.example.data.local.ThemeMode
 import com.example.data.preferences.AppSettings
 import com.example.data.preferences.SettingsRepository
@@ -96,19 +112,32 @@ fun SettingsScreen(
     testState: ConnectionTestState,
     modelsState: ModelsFetchState,
     driveState: DriveBackupUiState,
+    apkPackageName: String,
+    apkSha1Fingerprint: String,
     onLanguageChange: (AppLanguage) -> Unit,
     onCalendarPreferenceChange: (CalendarPreference) -> Unit,
     onThemeModeChange: (ThemeMode) -> Unit,
     onDynamicColorChange: (Boolean) -> Unit,
     onCaptureNotificationsChange: (Boolean) -> Unit,
+    onSmsNotificationsChange: (Boolean) -> Unit,
+    onNotificationPreviewChange: (Boolean) -> Unit,
+    onNotificationVibrateChange: (Boolean) -> Unit,
+    onPickSmsRingtone: () -> Unit,
+    onOpenSmsChannelSettings: () -> Unit,
     onRequestDefaultSms: () -> Unit,
     onOpenNotificationListenerSettings: () -> Unit,
-    onSaveAiConfig: (AiProviderType, String, String, String) -> Unit,
-    onTestAiConnection: (AiProviderType, String, String, String) -> Unit,
+    onSaveAiConfig: (AiProviderType, String, String, String, Int) -> Unit,
+    onTestAiConnection: (AiProviderType, String, String, String, Int) -> Unit,
     onFetchModels: (AiProviderType, String, String) -> Unit,
     onClearAiConfig: () -> Unit,
     onBackupScopeChange: (Boolean, Boolean) -> Unit,
+    onBackupSyncModeChange: (BackupSyncMode) -> Unit,
     onConnectGoogleDrive: () -> Unit,
+    onConnectDriveFallbackAccount: () -> Unit,
+    onLaunchDriveBrowserPkce: (String) -> Unit,
+    onCompleteDriveBrowserPkce: (String) -> Unit,
+    onConnectDriveWithToken: (String) -> Unit,
+    onToggleDriveTroubleshooting: (Boolean) -> Unit,
     onDisconnectGoogleDrive: () -> Unit,
     onRefreshDriveBackups: () -> Unit,
     onBackupToGoogleDrive: () -> Unit,
@@ -126,15 +155,41 @@ fun SettingsScreen(
     var baseUrl by remember(settings.aiBaseUrl) { mutableStateOf(settings.aiBaseUrl) }
     var modelName by remember(settings.aiModelName) { mutableStateOf(settings.aiModelName) }
     var apiKey by remember(settings.aiApiKey) { mutableStateOf(settings.aiApiKey) }
+    var contextLimitText by remember(settings.aiContextLimitTokens) {
+        mutableStateOf(settings.aiContextLimitTokens.toString())
+    }
     var showKey by remember { mutableStateOf(false) }
     var inlineStatusMessage by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(settings.aiProviderType, settings.aiBaseUrl, settings.aiModelName, settings.aiApiKey) {
+    var customClientId by remember(settings.driveCustomClientId) {
+        mutableStateOf(settings.driveCustomClientId)
+    }
+    var manualPkceCodeInput by remember { mutableStateOf("") }
+    var manualAccessTokenInput by remember { mutableStateOf("") }
+    var diagCopiedMessage by remember { mutableStateOf(false) }
+
+    LaunchedEffect(
+        settings.aiProviderType,
+        settings.aiBaseUrl,
+        settings.aiModelName,
+        settings.aiApiKey,
+        settings.aiContextLimitTokens
+    ) {
         provider = settings.aiProviderType
         baseUrl = settings.aiBaseUrl
         modelName = settings.aiModelName
         apiKey = settings.aiApiKey
+        contextLimitText = settings.aiContextLimitTokens.toString()
     }
+
+    LaunchedEffect(settings.driveCustomClientId) {
+        if (customClientId.isBlank() && settings.driveCustomClientId.isNotBlank()) {
+            customClientId = settings.driveCustomClientId
+        }
+    }
+
+    val resolvedContextLimit = contextLimitText.toIntOrNull()?.coerceIn(1_024, 2_000_000)
+        ?: settings.aiContextLimitTokens
 
     Scaffold(
         topBar = {
@@ -299,7 +354,136 @@ fun SettingsScreen(
                 }
             }
 
-            // 3. AI API Configuration
+            // 3. Notification Display & Ringtone Settings
+            SettingsSectionCard(
+                icon = Icons.Default.NotificationsActive,
+                title = strings.sectionNotificationSettings
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(strings.incomingSmsNotifToggle, style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            strings.incomingSmsNotifSubtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Switch(
+                        checked = settings.smsNotificationsEnabled,
+                        onCheckedChange = onSmsNotificationsChange,
+                        modifier = Modifier.testTag("sms_notifications_switch")
+                    )
+                }
+
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.14f))
+                Spacer(Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(strings.notifPreviewTextToggle, style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            strings.notifPreviewTextSubtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Switch(
+                        checked = settings.showNotificationPreviewText,
+                        onCheckedChange = onNotificationPreviewChange,
+                        enabled = settings.smsNotificationsEnabled,
+                        modifier = Modifier.testTag("notif_preview_switch")
+                    )
+                }
+
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.14f))
+                Spacer(Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = strings.notifVibrateToggle,
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = settings.notificationVibrate,
+                        onCheckedChange = onNotificationVibrateChange,
+                        enabled = settings.smsNotificationsEnabled,
+                        modifier = Modifier.testTag("notif_vibrate_switch")
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    onClick = onPickSmsRingtone,
+                    enabled = settings.smsNotificationsEnabled,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("pick_sms_ringtone_row")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MusicNote,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = strings.smsRingtoneLabel,
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                            Text(
+                                text = settings.smsRingtoneTitle.ifBlank { strings.ringtoneDefault },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                OutlinedButton(
+                    onClick = onOpenSmsChannelSettings,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("open_sms_channel_settings_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.SettingsApplications,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(strings.openSystemChannelSettings)
+                }
+            }
+
+            // 4. AI API Configuration + Context Window & Capabilities
             SettingsSectionCard(
                 icon = Icons.Default.Key,
                 title = strings.sectionAiConfiguration
@@ -533,6 +717,42 @@ fun SettingsScreen(
                     else -> Unit
                 }
 
+                Spacer(Modifier.height(10.dp))
+
+                // Context window limit setting + preset chips
+                OutlinedTextField(
+                    value = contextLimitText,
+                    onValueChange = { raw ->
+                        contextLimitText = raw.filter { it.isDigit() }.take(7)
+                        inlineStatusMessage = null
+                    },
+                    label = { Text(strings.aiContextLimitLabel) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFontFamily),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("ai_context_limit_input")
+                )
+                Spacer(Modifier.height(6.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    listOf(4_096, 8_192, 16_384, 32_000, 65_536, 128_000).forEach { presetTokens ->
+                        FilterChip(
+                            selected = resolvedContextLimit == presetTokens,
+                            onClick = { contextLimitText = presetTokens.toString() },
+                            label = {
+                                Text(
+                                    text = "${presetTokens / 1000}K",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily)
+                                )
+                            }
+                        )
+                    }
+                }
+
                 Spacer(Modifier.height(12.dp))
 
                 Row(
@@ -541,7 +761,7 @@ fun SettingsScreen(
                 ) {
                     Button(
                         onClick = {
-                            onSaveAiConfig(provider, baseUrl, modelName, apiKey)
+                            onSaveAiConfig(provider, baseUrl, modelName, apiKey, resolvedContextLimit)
                             inlineStatusMessage = strings.aiConfigSaved
                         },
                         modifier = Modifier
@@ -553,7 +773,7 @@ fun SettingsScreen(
                     OutlinedButton(
                         onClick = {
                             inlineStatusMessage = null
-                            onTestAiConnection(provider, baseUrl, modelName, apiKey)
+                            onTestAiConnection(provider, baseUrl, modelName, apiKey, resolvedContextLimit)
                         },
                         enabled = testState !is ConnectionTestState.Testing,
                         modifier = Modifier
@@ -596,6 +816,58 @@ fun SettingsScreen(
                     )
                 }
 
+                // Detected or persisted AI capabilities (file upload, image input, context length)
+                val showCapabilities = testState is ConnectionTestState.Success || settings.aiCapabilitiesChecked
+                val capFileSupported = (testState as? ConnectionTestState.Success)?.supportsFileUpload
+                    ?: settings.aiSupportsFileUpload
+                val capImageSupported = (testState as? ConnectionTestState.Success)?.supportsImageInput
+                    ?: settings.aiSupportsImageInput
+                val detectedCtx = (testState as? ConnectionTestState.Success)?.detectedContextLength
+
+                if (showCapabilities) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = strings.aiCapabilitiesLabel,
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        CapabilityBadge(
+                            icon = Icons.Default.AttachFile,
+                            label = if (capFileSupported) {
+                                strings.capabilityFileSupported
+                            } else {
+                                strings.capabilityFileUnsupported
+                            },
+                            supported = capFileSupported
+                        )
+                        CapabilityBadge(
+                            icon = Icons.Default.Image,
+                            label = if (capImageSupported) {
+                                strings.capabilityImageSupported
+                            } else {
+                                strings.capabilityImageUnsupported
+                            },
+                            supported = capImageSupported
+                        )
+                        if (detectedCtx != null) {
+                            FilterChip(
+                                selected = resolvedContextLimit == detectedCtx,
+                                onClick = { contextLimitText = detectedCtx.toString() },
+                                label = {
+                                    Text(
+                                        text = "${strings.capabilityDetectedCtx}: ${DateUtils.formatNumber(detectedCtx, isPersian)}",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            )
+                        }
+                    }
+                }
+
                 when (testState) {
                     is ConnectionTestState.Success -> {
                         Spacer(Modifier.height(8.dp))
@@ -604,16 +876,19 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.secondaryContainer,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Row(
-                                modifier = Modifier.padding(10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Text(
-                                    text = "OK: ${testState.preview}",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
+                            SelectionContainer {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Text(
+                                        text = "OK: ${testState.preview}" +
+                                            if (testState.capabilitySummary.isNotBlank()) "\n${testState.capabilitySummary}" else "",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
                             }
                         }
                     }
@@ -624,17 +899,19 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.errorContainer,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Row(
-                                modifier = Modifier.padding(10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(Icons.Default.ErrorOutline, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Text(
-                                    text = testState.message,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onErrorContainer
-                                )
+                            SelectionContainer {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(Icons.Default.ErrorOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Text(
+                                        text = testState.message,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                }
                             }
                         }
                     }
@@ -642,7 +919,7 @@ fun SettingsScreen(
                 }
             }
 
-            // 4. Google Drive Backup & Restore
+            // 5. Google Drive Backup & Restore + Device OAuth Fallbacks
             SettingsSectionCard(
                 icon = Icons.Default.Backup,
                 title = strings.sectionGoogleDriveBackup
@@ -730,6 +1007,56 @@ fun SettingsScreen(
                 }
 
                 Spacer(Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
+                Spacer(Modifier.height(10.dp))
+
+                val isAutoBackup = settings.backupSyncMode == BackupSyncMode.AUTOMATIC
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(strings.backupSyncModeLabel, style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            text = if (isAutoBackup) {
+                                strings.backupModeAutoSubtitle
+                            } else {
+                                strings.backupModeManualSubtitle
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Switch(
+                        checked = isAutoBackup,
+                        onCheckedChange = { enabled ->
+                            onBackupSyncModeChange(
+                                if (enabled) BackupSyncMode.AUTOMATIC else BackupSyncMode.MANUAL
+                            )
+                        },
+                        modifier = Modifier.testTag("backup_auto_toggle")
+                    )
+                }
+
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = !isAutoBackup,
+                        onClick = { onBackupSyncModeChange(BackupSyncMode.MANUAL) },
+                        label = { Text(strings.backupModeManual) },
+                        modifier = Modifier.testTag("backup_mode_manual_chip")
+                    )
+                    FilterChip(
+                        selected = isAutoBackup,
+                        onClick = { onBackupSyncModeChange(BackupSyncMode.AUTOMATIC) },
+                        label = { Text(strings.backupModeAutomatic) },
+                        modifier = Modifier.testTag("backup_mode_auto_chip")
+                    )
+                }
+
+                Spacer(Modifier.height(10.dp))
 
                 if (!driveState.isConnected) {
                     Button(
@@ -745,6 +1072,143 @@ fun SettingsScreen(
                             Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
                             Text(strings.driveConnectButton)
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    OutlinedButton(
+                        onClick = onConnectDriveFallbackAccount,
+                        enabled = !driveState.isBusy,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("drive_fallback_account_button")
+                    ) {
+                        Icon(Icons.Default.AccountCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(strings.driveFallbackAccountButton)
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(
+                            onClick = { onToggleDriveTroubleshooting(!driveState.showTroubleshooting) },
+                            modifier = Modifier.testTag("toggle_drive_troubleshooting_button")
+                        ) {
+                            Icon(Icons.Default.Build, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(strings.driveTroubleshootingTitle)
+                        }
+                    }
+
+                    AnimatedVisibility(visible = driveState.showTroubleshooting) {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 4.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = strings.driveDiagnosticsHint,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+
+                                SelectionContainer {
+                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            text = "${strings.drivePackageLabel}: $apkPackageName",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily)
+                                        )
+                                        Text(
+                                            text = "${strings.driveSha1Label}: $apkSha1Fingerprint",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily)
+                                        )
+                                    }
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        val diag = "Package: $apkPackageName\nSHA-1: $apkSha1Fingerprint\nRedirect URI: $apkPackageName:/oauth2redirect"
+                                        clipboard.setText(AnnotatedString(diag))
+                                        diagCopiedMessage = true
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(if (diagCopiedMessage) strings.copiedToClipboard else strings.driveCopyDiagInfo)
+                                }
+
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
+
+                                OutlinedTextField(
+                                    value = customClientId,
+                                    onValueChange = { customClientId = it },
+                                    label = { Text(strings.driveCustomClientIdLabel) },
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    OutlinedButton(
+                                        onClick = { onLaunchDriveBrowserPkce(customClientId) },
+                                        enabled = customClientId.isNotBlank() && !driveState.isBusy,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(Icons.Default.OpenInBrowser, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(strings.driveBrowserLoginButton, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+
+                                if (customClientId.isNotBlank()) {
+                                    OutlinedTextField(
+                                        value = manualPkceCodeInput,
+                                        onValueChange = { manualPkceCodeInput = it },
+                                        label = { Text("OAuth Redirect URL / Code") },
+                                        singleLine = true,
+                                        trailingIcon = {
+                                            TextButton(
+                                                onClick = { onCompleteDriveBrowserPkce(manualPkceCodeInput) },
+                                                enabled = manualPkceCodeInput.isNotBlank()
+                                            ) {
+                                                Text(strings.apply)
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
+
+                                OutlinedTextField(
+                                    value = manualAccessTokenInput,
+                                    onValueChange = { manualAccessTokenInput = it },
+                                    label = { Text(strings.drivePasteTokenLabel) },
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Button(
+                                    onClick = { onConnectDriveWithToken(manualAccessTokenInput) },
+                                    enabled = manualAccessTokenInput.isNotBlank() && !driveState.isBusy,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(strings.driveConnectWithTokenButton)
+                                }
+                            }
                         }
                     }
                 } else {
@@ -891,21 +1355,23 @@ fun SettingsScreen(
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(
-                            text = statusMsg,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (driveState.isError) {
-                                MaterialTheme.colorScheme.onErrorContainer
-                            } else {
-                                MaterialTheme.colorScheme.onSecondaryContainer
-                            },
-                            modifier = Modifier.padding(10.dp)
-                        )
+                        SelectionContainer {
+                            Text(
+                                text = statusMsg,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (driveState.isError) {
+                                    MaterialTheme.colorScheme.onErrorContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSecondaryContainer
+                                },
+                                modifier = Modifier.padding(10.dp)
+                            )
+                        }
                     }
                 }
             }
 
-            // 5. Appearance
+            // 6. Appearance
             SettingsSectionCard(
                 icon = Icons.Default.Palette,
                 title = strings.sectionAppearance
@@ -953,7 +1419,7 @@ fun SettingsScreen(
                 }
             }
 
-            // 5. About / Release Version Info
+            // 7. About / Release Version Info
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -975,6 +1441,48 @@ fun SettingsScreen(
             }
 
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun CapabilityBadge(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    supported: Boolean
+) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = if (supported) {
+            MaterialTheme.colorScheme.secondaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHighest
+        }
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.size(15.dp),
+                tint = if (supported) {
+                    MaterialTheme.colorScheme.secondary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (supported) {
+                    MaterialTheme.colorScheme.onSecondaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
         }
     }
 }

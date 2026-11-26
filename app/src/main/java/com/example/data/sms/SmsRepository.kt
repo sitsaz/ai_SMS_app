@@ -1,11 +1,13 @@
 package com.example.data.sms
 
 import android.Manifest
+import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Telephony
@@ -16,8 +18,10 @@ import com.example.R
 import com.example.core.compat.AndroidCompat
 import com.example.data.local.ConversationRow
 import com.example.data.local.DeliveryStatus
+import com.example.data.local.PinnedThreadEntity
 import com.example.data.local.SmsDao
 import com.example.data.local.SmsMessage
+import com.example.data.preferences.SettingsRepository
 import com.example.sms.SmsSenderManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -27,13 +31,17 @@ class SmsRepository(
     private val context: Context,
     private val smsDao: SmsDao,
     private val contactsRepository: ContactsRepository,
-    private val senderManager: SmsSenderManager
+    private val senderManager: SmsSenderManager,
+    private val settingsRepository: SettingsRepository
 ) {
 
     fun observeConversations(): Flow<List<ConversationRow>> = smsDao.observeConversations()
 
     fun observeThreadMessages(threadId: Long): Flow<List<SmsMessage>> =
         smsDao.observeThreadMessages(threadId)
+
+    fun observePinnedMessagesInThread(threadId: Long): Flow<List<SmsMessage>> =
+        smsDao.observePinnedMessagesInThread(threadId)
 
     suspend fun syncFromSystemInbox(): Int = withContext(Dispatchers.IO) {
         if (!AndroidCompat.hasPermission(context, Manifest.permission.READ_SMS)) {
@@ -245,19 +253,27 @@ class SmsRepository(
         )
     }
 
-    private fun postIncomingSmsNotification(
+    private suspend fun postIncomingSmsNotification(
         threadId: Long,
         messageId: Long,
         address: String,
         title: String,
         body: String
     ) {
+        val settings = settingsRepository.getCurrentSettings()
+        if (!settings.smsNotificationsEnabled) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             !AndroidCompat.hasPermission(context, Manifest.permission.POST_NOTIFICATIONS)
         ) {
             return
         }
-        AndroidCompat.ensureSmsNotificationChannel(context, "SMS Messages")
+        val channelId = AndroidCompat.ensureSmsNotificationChannel(
+            context = context,
+            title = "SMS Messages",
+            channelVersion = settings.notificationChannelVersion,
+            ringtoneUriString = settings.smsRingtoneUri,
+            vibrate = settings.notificationVibrate
+        )
         val launchIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(MainActivity.EXTRA_OPEN_THREAD_ID, threadId)
@@ -270,18 +286,40 @@ class SmsRepository(
             launchIntent,
             AndroidCompat.pendingIntentImmutableFlags()
         )
-        val notification = NotificationCompat.Builder(context, AndroidCompat.SMS_CHANNEL_ID)
+        val displayBody = if (settings.showNotificationPreviewText) {
+            body
+        } else {
+            "New SMS message received"
+        }
+        val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(title)
-            .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setContentText(displayBody)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(displayBody))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .setContentIntent(pi)
-            .build()
+
+        if (!settings.showNotificationPreviewText) {
+            builder.setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+        }
+        if (settings.smsRingtoneUri == AndroidCompat.RINGTONE_SILENT_VALUE) {
+            builder.setSilent(true)
+        } else if (settings.smsRingtoneUri.isNotBlank()) {
+            runCatching { Uri.parse(settings.smsRingtoneUri) }.getOrNull()?.let { uri ->
+                builder.setSound(uri)
+            }
+        } else {
+            builder.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))
+        }
+        if (!settings.notificationVibrate) {
+            builder.setVibrate(longArrayOf(0L))
+        } else {
+            builder.setDefaults(Notification.DEFAULT_LIGHTS or Notification.DEFAULT_VIBRATE)
+        }
 
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-        manager?.notify(threadId.toInt(), notification)
+        manager?.notify(threadId.toInt(), builder.build())
     }
 
     suspend fun markThreadRead(threadId: Long) = withContext(Dispatchers.IO) {
@@ -313,6 +351,7 @@ class SmsRepository(
     }
 
     suspend fun deleteThread(threadId: Long) = withContext(Dispatchers.IO) {
+        smsDao.unpinThread(threadId)
         smsDao.deleteThread(threadId)
         if (AndroidCompat.isDefaultSmsApp(context)) {
             runCatching {
@@ -322,6 +361,22 @@ class SmsRepository(
                     arrayOf(threadId.toString())
                 )
             }
+        }
+    }
+
+    suspend fun setMessagePinned(messageId: Long, pinned: Boolean) = withContext(Dispatchers.IO) {
+        smsDao.setMessagePinned(
+            id = messageId,
+            pinned = pinned,
+            pinnedAt = if (pinned) System.currentTimeMillis() else 0L
+        )
+    }
+
+    suspend fun setThreadPinned(threadId: Long, pinned: Boolean) = withContext(Dispatchers.IO) {
+        if (pinned) {
+            smsDao.pinThread(PinnedThreadEntity(threadId = threadId, pinnedAt = System.currentTimeMillis()))
+        } else {
+            smsDao.unpinThread(threadId)
         }
     }
 }

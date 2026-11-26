@@ -10,16 +10,20 @@ import com.example.core.compat.AndroidCompat
 import com.example.data.local.ConversationRow
 import com.example.data.local.NotificationItem
 import com.example.data.local.SmsMessage
+import com.example.data.local.SearchSourceFilter
 import com.example.data.search.SearchResultItem
 import com.example.data.search.toSearchResult
 import com.example.data.sms.ContactItem
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -35,13 +39,19 @@ data class SystemStatusState(
     val isNotificationListenerEnabled: Boolean = false
 )
 
-@OptIn(ExperimentalCoroutinesApi::class)
+@OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val container = (application as AiSmsApplication).container
     private val smsDao = container.database.smsDao()
     private val smsRepository = container.smsRepository
-    private val contactsRepository = container.contactsRepository
     private val notificationRepository = container.notificationRepository
+    private val contactsRepository = container.contactsRepository
+    private val settingsRepository = container.settingsRepository
+    private val searchRepository = container.searchRepository
+
+    private var bannerCheckedForSession = false
+    private val _allowBannerThisSession = MutableStateFlow(false)
+    private val _dismissedBannerThisSession = MutableStateFlow(false)
 
     val conversations: StateFlow<List<ConversationRow>> = smsRepository.observeConversations()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -89,9 +99,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _systemStatus = MutableStateFlow(SystemStatusState())
     val systemStatus: StateFlow<SystemStatusState> = _systemStatus.asStateFlow()
 
+    val shouldShowDefaultSmsBanner: StateFlow<Boolean> = combine(
+        _systemStatus,
+        settingsRepository.settingsFlow,
+        _allowBannerThisSession,
+        _dismissedBannerThisSession
+    ) { status, settings, allowSession, dismissed ->
+        if (!status.hasSmsPermissions || status.isDefaultSmsApp || dismissed) {
+            false
+        } else if (allowSession) {
+            true
+        } else {
+            val now = System.currentTimeMillis()
+            val lastShown = settings.lastDefaultSmsBannerShownMs
+            val dayElapsed = lastShown <= 0L || (now - lastShown) >= 86_400_000L
+            if (dayElapsed && !bannerCheckedForSession) {
+                bannerCheckedForSession = true
+                _allowBannerThisSession.value = true
+                viewModelScope.launch {
+                    settingsRepository.setLastDefaultSmsBannerShownMs(now)
+                }
+                true
+            } else {
+                false
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
     init {
         refreshSystemStatuses()
         syncAllIfPermitted()
+        viewModelScope.launch {
+            combine(_smsSearchQuery, smsSearchResults) { q, res -> q.trim() to res }
+                .debounce(1_100L)
+                .collectLatest { (cleanQuery, results) ->
+                    if (cleanQuery.length >= 2) {
+                        searchRepository.saveSearchToArchive(
+                            query = cleanQuery,
+                            origin = "SMS_BAR",
+                            sourceFilter = SearchSourceFilter.SMS_ONLY,
+                            results = results
+                        )
+                    }
+                }
+        }
+    }
+
+    fun saveCurrentSmsSearchToArchive() {
+        val cleanQuery = _smsSearchQuery.value.trim()
+        if (cleanQuery.isEmpty()) return
+        val results = smsSearchResults.value
+        viewModelScope.launch {
+            searchRepository.saveSearchToArchive(
+                query = cleanQuery,
+                origin = "SMS_BAR",
+                sourceFilter = SearchSourceFilter.SMS_ONLY,
+                results = results
+            )
+        }
+    }
+
+    fun dismissDefaultSmsBannerToday() {
+        _dismissedBannerThisSession.value = true
+        _allowBannerThisSession.value = false
+        viewModelScope.launch {
+            settingsRepository.setLastDefaultSmsBannerShownMs(System.currentTimeMillis())
+        }
     }
 
     fun setSmsSearchExpanded(expanded: Boolean) {
@@ -136,6 +209,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun observeThreadMessages(threadId: Long): Flow<List<SmsMessage>> =
         smsRepository.observeThreadMessages(threadId)
+
+    fun observePinnedMessagesInThread(threadId: Long): Flow<List<SmsMessage>> =
+        smsRepository.observePinnedMessagesInThread(threadId)
+
+    fun setMessagePinned(messageId: Long, pinned: Boolean) {
+        viewModelScope.launch {
+            smsRepository.setMessagePinned(messageId, pinned)
+        }
+    }
+
+    fun setThreadPinned(threadId: Long, pinned: Boolean) {
+        viewModelScope.launch {
+            smsRepository.setThreadPinned(threadId, pinned)
+        }
+    }
 
     fun markThreadRead(threadId: Long) {
         viewModelScope.launch {

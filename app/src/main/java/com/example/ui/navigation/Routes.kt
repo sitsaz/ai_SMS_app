@@ -15,6 +15,13 @@ data object NotificationsRoute
 data object SettingsRoute
 
 @Serializable
+data class AIChatRoute(
+    val source: String = "",
+    val threadId: Long = -1L,
+    val topicId: Long = -1L
+)
+
+@Serializable
 data class ThreadRoute(
     val threadId: Long,
     val address: String,

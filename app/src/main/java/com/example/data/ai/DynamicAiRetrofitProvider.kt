@@ -5,6 +5,7 @@ import com.example.data.preferences.AppSettings
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import okhttp3.Interceptor
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody
 import okhttp3.ResponseBody
@@ -13,9 +14,12 @@ import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.Header
+import retrofit2.http.Multipart
 import retrofit2.http.POST
+import retrofit2.http.Part
 import retrofit2.http.Url
 import java.util.concurrent.TimeUnit
 
@@ -42,6 +46,29 @@ interface DynamicAiApiService {
     suspend fun getGeminiModels(
         @Url url: String,
         @Header("x-goog-api-key") apiKey: String
+    ): Response<ResponseBody>
+
+    @Multipart
+    @POST
+    suspend fun uploadOpenAiFile(
+        @Url url: String,
+        @Part("purpose") purpose: RequestBody,
+        @Part file: MultipartBody.Part
+    ): Response<ResponseBody>
+
+    @DELETE
+    suspend fun deleteOpenAiFile(
+        @Url url: String
+    ): Response<ResponseBody>
+
+    @POST
+    suspend fun uploadGeminiFile(
+        @Url url: String,
+        @Header("x-goog-api-key") apiKey: String,
+        @Header("X-Goog-Upload-Protocol") uploadProtocol: String = "raw",
+        @Header("X-Goog-Upload-Header-Content-Length") contentLength: Long,
+        @Header("X-Goog-Upload-Header-Content-Type") contentType: String = "text/xml",
+        @Body fileBody: RequestBody
     ): Response<ResponseBody>
 }
 

@@ -29,10 +29,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MarkChatUnread
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -89,23 +91,28 @@ fun MessagesScreen(
     conversations: List<ConversationRow>,
     contacts: List<ContactItem>,
     systemStatus: SystemStatusState,
+    showDefaultSmsBanner: Boolean,
     isSyncing: Boolean,
     isSearchExpanded: Boolean,
     searchQuery: String,
     searchResults: List<SearchResultItem>,
     onSearchExpandedChange: (Boolean) -> Unit,
     onSearchQueryChange: (String) -> Unit,
+    onSearchSubmit: () -> Unit = {},
     onRequestPermissions: () -> Unit,
     onRequestDefaultSms: () -> Unit,
+    onDismissDefaultSmsBanner: () -> Unit,
     onSyncSms: () -> Unit,
     onOpenThread: (threadId: Long, address: String, targetMessageId: Long) -> Unit,
     onStartChatWithAddress: (address: String) -> Unit,
+    onTogglePinThread: (threadId: Long, pinned: Boolean) -> Unit,
     onDeleteThread: (threadId: Long) -> Unit
 ) {
     val strings = LocalStrings.current
     val isPersian = LocalIsPersian.current
     val calendarMode = LocalCalendarMode.current
     var showContactsSheet by remember { mutableStateOf(false) }
+    var threadActionTarget by remember { mutableStateOf<ConversationRow?>(null) }
     var threadPendingDelete by remember { mutableStateOf<ConversationRow?>(null) }
     val searchFocusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -142,7 +149,10 @@ fun MessagesScreen(
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                                 keyboardActions = KeyboardActions(
-                                    onSearch = { keyboardController?.hide() }
+                                    onSearch = {
+                                        onSearchSubmit()
+                                        keyboardController?.hide()
+                                    }
                                 ),
                                 colors = TextFieldDefaults.colors(
                                     focusedContainerColor = Color.Transparent,
@@ -289,6 +299,7 @@ fun MessagesScreen(
                             calendarMode = calendarMode,
                             strings = strings,
                             onClick = {
+                                onSearchSubmit()
                                 val tid = item.threadId ?: return@SearchResultCard
                                 onOpenThread(tid, item.senderSecondary, item.itemId)
                             }
@@ -320,13 +331,15 @@ fun MessagesScreen(
                 }
 
                 item {
-                    AnimatedVisibility(visible = systemStatus.hasSmsPermissions && !systemStatus.isDefaultSmsApp) {
+                    AnimatedVisibility(visible = showDefaultSmsBanner) {
                         StatusActionCard(
                             icon = Icons.Default.Sms,
                             title = strings.defaultSmsBannerTitle,
                             body = strings.defaultSmsBannerBody,
                             buttonLabel = strings.setAsDefaultSms,
                             onClick = onRequestDefaultSms,
+                            onDismiss = onDismissDefaultSmsBanner,
+                            dismissContentDescription = strings.dismissForToday,
                             testTag = "set_default_sms_button",
                             modifier = Modifier.padding(bottom = 8.dp)
                         )
@@ -383,14 +396,14 @@ fun MessagesScreen(
                                 .testTag("conversation_card_${conv.threadId}")
                                 .combinedClickable(
                                     onClick = { onOpenThread(conv.threadId, conv.address, -1L) },
-                                    onLongClick = { threadPendingDelete = conv }
+                                    onLongClick = { threadActionTarget = conv }
                                 ),
                             shape = RoundedCornerShape(16.dp),
                             colors = CardDefaults.cardColors(
-                                containerColor = if (conv.unreadCount > 0) {
-                                    MaterialTheme.colorScheme.surfaceContainerHigh
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceContainerLow
+                                containerColor = when {
+                                    conv.isPinned -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
+                                    conv.unreadCount > 0 -> MaterialTheme.colorScheme.surfaceContainerHigh
+                                    else -> MaterialTheme.colorScheme.surfaceContainerLow
                                 }
                             )
                         ) {
@@ -408,14 +421,27 @@ fun MessagesScreen(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(
-                                            text = displayName,
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = if (conv.unreadCount > 0) FontWeight.Bold else FontWeight.SemiBold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
                                             modifier = Modifier.weight(1f)
-                                        )
+                                        ) {
+                                            if (conv.isPinned) {
+                                                Icon(
+                                                    imageVector = Icons.Default.PushPin,
+                                                    contentDescription = strings.pinnedThreadsBadge,
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(15.dp)
+                                                )
+                                                Spacer(Modifier.width(4.dp))
+                                            }
+                                            Text(
+                                                text = displayName,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                fontWeight = if (conv.unreadCount > 0 || conv.isPinned) FontWeight.Bold else FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
                                         Spacer(Modifier.width(8.dp))
                                         Text(
                                             text = DateUtils.formatListTimestamp(
@@ -462,17 +488,32 @@ fun MessagesScreen(
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                         }
-                                        if (conv.unreadCount > 0) {
-                                            Spacer(Modifier.width(8.dp))
-                                            Surface(
-                                                shape = CircleShape,
-                                                color = MaterialTheme.colorScheme.primary
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            if (conv.unreadCount > 0) {
+                                                Spacer(Modifier.width(6.dp))
+                                                Surface(
+                                                    shape = CircleShape,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                ) {
+                                                    Text(
+                                                        text = DateUtils.formatNumber(conv.unreadCount, isPersian),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onPrimary,
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                    )
+                                                }
+                                            }
+                                            IconButton(
+                                                onClick = { onTogglePinThread(conv.threadId, !conv.isPinned) },
+                                                modifier = Modifier
+                                                    .size(34.dp)
+                                                    .testTag("pin_thread_button_${conv.threadId}")
                                             ) {
-                                                Text(
-                                                    text = DateUtils.formatNumber(conv.unreadCount, isPersian),
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.onPrimary,
-                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                Icon(
+                                                    imageVector = if (conv.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
+                                                    contentDescription = if (conv.isPinned) strings.unpinThread else strings.pinThread,
+                                                    tint = if (conv.isPinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                                                    modifier = Modifier.size(16.dp)
                                                 )
                                             }
                                         }
@@ -496,6 +537,46 @@ fun MessagesScreen(
                 onStartChatWithAddress(addr)
             },
             onDismiss = { showContactsSheet = false }
+        )
+    }
+
+    threadActionTarget?.let { conv ->
+        val displayTitle = conv.contactName?.takeIf { it.isNotBlank() } ?: conv.address
+        AlertDialog(
+            onDismissRequest = { threadActionTarget = null },
+            title = { Text(displayTitle) },
+            text = { Text(conv.body.take(120)) },
+            confirmButton = {
+                FilledTonalButton(
+                    onClick = {
+                        onTogglePinThread(conv.threadId, !conv.isPinned)
+                        threadActionTarget = null
+                    }
+                ) {
+                    Icon(
+                        imageVector = if (conv.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (conv.isPinned) strings.unpinThread else strings.pinThread)
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(
+                        onClick = {
+                            threadActionTarget = null
+                            threadPendingDelete = conv
+                        }
+                    ) {
+                        Text(strings.deleteThread, color = MaterialTheme.colorScheme.error)
+                    }
+                    TextButton(onClick = { threadActionTarget = null }) {
+                        Text(strings.cancel)
+                    }
+                }
+            }
         )
     }
 
@@ -532,7 +613,9 @@ private fun StatusActionCard(
     buttonLabel: String,
     onClick: () -> Unit,
     testTag: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onDismiss: (() -> Unit)? = null,
+    dismissContentDescription: String = ""
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -572,6 +655,18 @@ private fun StatusActionCard(
                 modifier = Modifier.testTag(testTag)
             ) {
                 Text(buttonLabel)
+            }
+            if (onDismiss != null) {
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.testTag("dismiss_default_sms_banner_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = dismissContentDescription,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
             }
         }
     }

@@ -17,11 +17,17 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -29,42 +35,62 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.core.localization.DateUtils
 import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
 import com.example.data.local.SearchDirectionFilter
+import com.example.data.local.SearchHistoryEntity
 import com.example.data.local.SearchSortOrder
 import com.example.data.local.SearchSourceFilter
 import com.example.data.search.SearchResultItem
 import com.example.ui.components.BilingualDateRangeDialog
 import com.example.ui.components.SearchResultCard
 import com.example.ui.viewmodel.LocalSearchFilterState
+import kotlinx.coroutines.delay
 
 @Composable
 fun LocalSearchPane(
     filterState: LocalSearchFilterState,
     results: List<SearchResultItem>,
+    recentSearches: List<SearchHistoryEntity> = emptyList(),
+    searchSavedTick: Long = 0L,
     onQueryChange: (String) -> Unit,
     onSortChange: (SearchSortOrder) -> Unit,
     onSourceChange: (SearchSourceFilter) -> Unit,
     onDirectionChange: (SearchDirectionFilter) -> Unit,
     onDateRangeChange: (Long, Long) -> Unit,
     onClearDateRange: () -> Unit,
+    onSaveSearch: () -> Unit = {},
+    onSelectRecentSearch: (SearchHistoryEntity) -> Unit = {},
     onResultClick: (SearchResultItem) -> Unit
 ) {
     val strings = LocalStrings.current
     val isPersian = LocalIsPersian.current
     val calendarMode = LocalCalendarMode.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     var showDateDialog by remember { mutableStateOf(false) }
+    var showSavedBadge by remember { mutableStateOf(false) }
+
+    LaunchedEffect(searchSavedTick) {
+        if (searchSavedTick > 0L) {
+            showSavedBadge = true
+            delay(1_800L)
+            showSavedBadge = false
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         OutlinedTextField(
@@ -75,11 +101,18 @@ fun LocalSearchPane(
             trailingIcon = {
                 if (filterState.query.isNotEmpty()) {
                     IconButton(onClick = { onQueryChange("") }) {
-                        Icon(Icons.Default.Close, contentDescription = null)
+                        Icon(Icons.Default.Close, contentDescription = strings.closeSearch)
                     }
                 }
             },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(
+                onSearch = {
+                    onSaveSearch()
+                    keyboardController?.hide()
+                }
+            ),
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier
                 .fillMaxWidth()
@@ -88,6 +121,38 @@ fun LocalSearchPane(
         )
 
         Spacer(Modifier.height(8.dp))
+
+        if (recentSearches.isNotEmpty() && filterState.query.isBlank() && filterState.startMs == 0L) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.History,
+                    contentDescription = strings.recentSearchesLabel,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp)
+                )
+                for (recent in recentSearches.take(8)) {
+                    val labelText = recent.query.ifBlank { strings.filterDateRange }
+                    AssistChip(
+                        onClick = { onSelectRecentSearch(recent) },
+                        label = {
+                            Text(
+                                text = "$labelText (${DateUtils.formatNumber(recent.resultCount, isPersian)})",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        modifier = Modifier.testTag("recent_search_chip_${recent.id}")
+                    )
+                }
+            }
+        }
 
         // Sort + Source + Direction + Date Range filter row
         Row(
@@ -196,12 +261,38 @@ fun LocalSearchPane(
             }
         }
 
-        Text(
-            text = "${DateUtils.formatNumber(results.size, isPersian)} ${strings.resultsCountLabel}",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 18.dp, vertical = 4.dp)
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "${DateUtils.formatNumber(results.size, isPersian)} ${strings.resultsCountLabel}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (filterState.query.isNotBlank() || filterState.startMs > 0L) {
+                AssistChip(
+                    onClick = onSaveSearch,
+                    leadingIcon = {
+                        Icon(
+                            imageVector = if (showSavedBadge) Icons.Default.Check else Icons.Default.BookmarkAdd,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    label = {
+                        Text(
+                            text = if (showSavedBadge) strings.searchSavedToast else strings.saveSearchAction,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    },
+                    modifier = Modifier.testTag("save_search_archive_button")
+                )
+            }
+        }
 
         if (results.isEmpty()) {
             Box(
@@ -237,7 +328,12 @@ fun LocalSearchPane(
                         highlightQuery = filterState.query,
                         isPersian = isPersian,
                         strings = strings,
-                        onClick = { onResultClick(item) }
+                        onClick = {
+                            if (filterState.query.isNotBlank() || filterState.startMs > 0L) {
+                                onSaveSearch()
+                            }
+                            onResultClick(item)
+                        }
                     )
                 }
                 item { Spacer(Modifier.height(16.dp)) }
