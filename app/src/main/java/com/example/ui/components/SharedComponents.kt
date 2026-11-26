@@ -73,6 +73,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.core.localization.AppStrings
 import com.example.core.localization.CalendarMode
+import com.example.core.localization.DateFormatter
 import com.example.core.localization.DateUtils
 import com.example.core.localization.LocalCalendarMode
 import com.example.data.ai.XmlArchiveBuildResult
@@ -306,7 +307,7 @@ fun SearchResultCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = DateUtils.formatDateTime(item.timestamp, calendarMode, usePersianDigits = isPersian),
+                    text = DateFormatter.formatChatTimestamp(item.timestamp, calendarMode, usePersianDigits = isPersian),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

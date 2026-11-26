@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -88,6 +89,7 @@ import androidx.compose.ui.unit.dp
 import com.example.BuildConfig
 import com.example.core.localization.AppLanguage
 import com.example.core.localization.CalendarPreference
+import com.example.core.localization.DateFormatter
 import com.example.core.localization.DateUtils
 import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
@@ -135,6 +137,7 @@ fun SettingsScreen(
     onConnectGoogleDrive: () -> Unit,
     onConnectDriveFallbackAccount: () -> Unit,
     onLaunchDriveBrowserPkce: (String) -> Unit,
+    onLaunchDriveLoopbackPkce: (String) -> Unit = {},
     onCompleteDriveBrowserPkce: (String) -> Unit,
     onConnectDriveWithToken: (String) -> Unit,
     onToggleDriveTroubleshooting: (Boolean) -> Unit,
@@ -188,10 +191,19 @@ fun SettingsScreen(
         }
     }
 
+    LaunchedEffect(testState) {
+        val success = testState as? ConnectionTestState.Success
+        val detected = success?.detectedContextLength
+        if (detected != null && detected >= 1_024) {
+            contextLimitText = detected.toString()
+        }
+    }
+
     val resolvedContextLimit = contextLimitText.toIntOrNull()?.coerceIn(1_024, 2_000_000)
         ?: settings.aiContextLimitTokens
 
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
                 title = {
@@ -816,19 +828,29 @@ fun SettingsScreen(
                     )
                 }
 
-                // Detected or persisted AI capabilities (file upload, image input, context length)
+                // Detected or persisted AI capabilities (stored in DataStore and enforced dynamically)
                 val showCapabilities = testState is ConnectionTestState.Success || settings.aiCapabilitiesChecked
-                val capFileSupported = (testState as? ConnectionTestState.Success)?.supportsFileUpload
-                    ?: settings.aiSupportsFileUpload
-                val capImageSupported = (testState as? ConnectionTestState.Success)?.supportsImageInput
-                    ?: settings.aiSupportsImageInput
-                val detectedCtx = (testState as? ConnectionTestState.Success)?.detectedContextLength
+                val successState = testState as? ConnectionTestState.Success
+                val capFileSupported = successState?.supportsFileUpload ?: settings.aiSupportsFileUpload
+                val capImageSupported = successState?.supportsImageInput ?: settings.aiSupportsImageInput
+                val capSystemSupported = successState?.supportsSystemPrompt ?: settings.aiSupportsSystemPrompt
+                val capTempSupported = successState?.supportsTemperature ?: settings.aiSupportsTemperature
+                val capJsonSupported = successState?.supportsJsonMode ?: settings.aiSupportsJsonMode
+                val capMaxOut = successState?.maxOutputTokens ?: settings.aiMaxOutputTokens
+                val detectedCtx = successState?.detectedContextLength
+                    ?: if (settings.aiCapabilitiesChecked) settings.aiContextLimitTokens else null
 
                 if (showCapabilities) {
                     Spacer(Modifier.height(8.dp))
                     Text(
                         text = strings.aiCapabilitiesLabel,
                         style = MaterialTheme.typography.labelLarge
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = strings.aiConstraintsAppliedNote,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(6.dp))
                     FlowRow(
@@ -853,6 +875,38 @@ fun SettingsScreen(
                             },
                             supported = capImageSupported
                         )
+                        CapabilityBadge(
+                            icon = Icons.Default.SettingsApplications,
+                            label = if (capSystemSupported) {
+                                strings.capabilitySystemSupported
+                            } else {
+                                strings.capabilitySystemUnsupported
+                            },
+                            supported = capSystemSupported
+                        )
+                        CapabilityBadge(
+                            icon = Icons.Default.Build,
+                            label = if (capTempSupported) {
+                                strings.capabilityTempSupported
+                            } else {
+                                strings.capabilityTempUnsupported
+                            },
+                            supported = capTempSupported
+                        )
+                        if (capJsonSupported) {
+                            CapabilityBadge(
+                                icon = Icons.Default.CheckCircle,
+                                label = strings.capabilityJsonSupported,
+                                supported = true
+                            )
+                        }
+                        if (capMaxOut > 0) {
+                            CapabilityBadge(
+                                icon = Icons.Default.Info,
+                                label = "${strings.aiMaxOutputTokensLabel}: ${DateUtils.formatNumber(capMaxOut, isPersian)}",
+                                supported = true
+                            )
+                        }
                         if (detectedCtx != null) {
                             FilterChip(
                                 selected = resolvedContextLimit == detectedCtx,
@@ -1149,6 +1203,12 @@ fun SettingsScreen(
 
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
 
+                                Text(
+                                    text = strings.driveLoopbackHint,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+
                                 OutlinedTextField(
                                     value = customClientId,
                                     onValueChange = { customClientId = it },
@@ -1158,19 +1218,26 @@ fun SettingsScreen(
                                     modifier = Modifier.fillMaxWidth()
                                 )
 
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                Button(
+                                    onClick = { onLaunchDriveLoopbackPkce(customClientId) },
+                                    enabled = customClientId.isNotBlank() && !driveState.isBusy,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("drive_loopback_pkce_button")
                                 ) {
-                                    OutlinedButton(
-                                        onClick = { onLaunchDriveBrowserPkce(customClientId) },
-                                        enabled = customClientId.isNotBlank() && !driveState.isBusy,
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Icon(Icons.Default.OpenInBrowser, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(6.dp))
-                                        Text(strings.driveBrowserLoginButton, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    }
+                                    Icon(Icons.Default.OpenInBrowser, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(strings.driveLoopbackPkceButton, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+
+                                OutlinedButton(
+                                    onClick = { onLaunchDriveBrowserPkce(customClientId) },
+                                    enabled = customClientId.isNotBlank() && !driveState.isBusy,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.OpenInBrowser, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(strings.driveBrowserLoginButton, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
 
                                 if (customClientId.isNotBlank()) {
@@ -1273,7 +1340,7 @@ fun SettingsScreen(
                                                 style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFontFamily),
                                                 maxLines = 1
                                             )
-                                            val ts = DateUtils.formatDateTime(
+                                            val ts = DateFormatter.formatChatTimestamp(
                                                 backup.modifiedAtMs,
                                                 calendarMode,
                                                 usePersianDigits = isPersian

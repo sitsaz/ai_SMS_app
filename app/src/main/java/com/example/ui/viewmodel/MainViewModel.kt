@@ -7,6 +7,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.AiSmsApplication
 import com.example.core.compat.AndroidCompat
+import com.example.data.archive.ConversationExportFormat
+import com.example.data.archive.ConversationExportFormatter
+import com.example.data.archive.ThreadWithAiArchive
+import com.example.data.local.AiTopicWithMessages
 import com.example.data.local.ConversationRow
 import com.example.data.local.NotificationItem
 import com.example.data.local.SmsMessage
@@ -24,6 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -48,6 +53,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val contactsRepository = container.contactsRepository
     private val settingsRepository = container.settingsRepository
     private val searchRepository = container.searchRepository
+    private val chatArchiveRepository = container.chatArchiveRepository
 
     private var bannerCheckedForSession = false
     private val _allowBannerThisSession = MutableStateFlow(false)
@@ -190,6 +196,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    fun ensureSmsObserverRegistered() {
+        refreshSystemStatuses()
+        if (_systemStatus.value.hasSmsPermissions) {
+            container.smsProviderObserver.registerIfPermitted()
+        }
+    }
+
     fun syncAllIfPermitted() {
         viewModelScope.launch {
             refreshSystemStatuses()
@@ -199,13 +212,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _contacts.value = contactsRepository.loadContacts()
                 }
                 if (_systemStatus.value.hasSmsPermissions) {
+                    container.smsProviderObserver.registerIfPermitted()
                     smsRepository.syncFromSystemInbox()
                 }
+                chatArchiveRepository.syncAllThreadSummaries()
             } finally {
                 _isSyncing.value = false
             }
         }
     }
+
+    val threadsWithAiArchive: StateFlow<List<ThreadWithAiArchive>> =
+        chatArchiveRepository.observeThreadsWithAiArchive()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun observeThreadAiHistory(threadId: Long): Flow<List<AiTopicWithMessages>> =
+        chatArchiveRepository.observeAiHistoryForSmsThread(threadId)
 
     fun observeThreadMessages(threadId: Long): Flow<List<SmsMessage>> =
         smsRepository.observeThreadMessages(threadId)
@@ -229,6 +251,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             smsRepository.markThreadRead(threadId)
         }
+    }
+
+    fun markAllMessagesRead() {
+        viewModelScope.launch {
+            smsRepository.markAllMessagesRead()
+        }
+    }
+
+    fun markAllNotificationsRead() {
+        viewModelScope.launch {
+            notificationRepository.markAllRead()
+        }
+    }
+
+    suspend fun exportThreadArchive(
+        threadId: Long,
+        format: ConversationExportFormat,
+        isPersian: Boolean
+    ): String? {
+        chatArchiveRepository.refreshThreadSummary(threadId)
+        val archive = chatArchiveRepository.observeThreadWithAiArchive(threadId).first() ?: return null
+        return ConversationExportFormatter.formatSmsThreadArchive(archive, format, isPersian)
     }
 
     suspend fun resolveThreadForAddress(address: String): Long =

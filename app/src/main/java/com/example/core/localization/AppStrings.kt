@@ -278,6 +278,24 @@ interface AppStrings {
     val originAiChatTab: String
     val originAiTopicsTab: String
     val archivedSnapshotNote: String
+    val threadAiHistoryBanner: String
+    val noThreadAiHistory: String
+    val markAllAsRead: String
+    val allMarkedAsRead: String
+    val openArchiveButton: String
+    val exportConversation: String
+    val exportAsText: String
+    val exportAsJson: String
+    val exportCompletedToast: String
+    val aiMaxOutputTokensLabel: String
+    val capabilitySystemSupported: String
+    val capabilitySystemUnsupported: String
+    val capabilityTempSupported: String
+    val capabilityTempUnsupported: String
+    val capabilityJsonSupported: String
+    val aiConstraintsAppliedNote: String
+    val driveLoopbackPkceButton: String
+    val driveLoopbackHint: String
 }
 
 private object EnglishStrings : AppStrings {
@@ -556,6 +574,24 @@ private object EnglishStrings : AppStrings {
     override val originAiChatTab = "AI Chat"
     override val originAiTopicsTab = "AI Topic"
     override val archivedSnapshotNote = "Viewing archived results snapshot"
+    override val threadAiHistoryBanner = "Previous AI Chats for Thread"
+    override val noThreadAiHistory = "No previous AI chats recorded for this thread yet."
+    override val markAllAsRead = "Mark all as read"
+    override val allMarkedAsRead = "All messages marked as read"
+    override val openArchiveButton = "Archive"
+    override val exportConversation = "Export Conversation"
+    override val exportAsText = "Export Readable Text (.txt)"
+    override val exportAsJson = "Export JSON (.json)"
+    override val exportCompletedToast = "Conversation exported successfully"
+    override val aiMaxOutputTokensLabel = "Max Output Tokens"
+    override val capabilitySystemSupported = "System Prompt: Supported"
+    override val capabilitySystemUnsupported = "System Prompt: Folded to User"
+    override val capabilityTempSupported = "Temperature: Supported"
+    override val capabilityTempUnsupported = "Temperature: Fixed/Omitted"
+    override val capabilityJsonSupported = "JSON Output: Supported"
+    override val aiConstraintsAppliedNote = "Model constraints saved and dynamically enforced on future requests."
+    override val driveLoopbackPkceButton = "Sign in via Browser (Loopback PKCE)"
+    override val driveLoopbackHint = "No SHA-1 needed when using a Desktop OAuth Client ID (redirects automatically via 127.0.0.1)."
 }
 
 private object PersianStrings : AppStrings {
@@ -834,6 +870,24 @@ private object PersianStrings : AppStrings {
     override val originAiChatTab = "چت AI"
     override val originAiTopicsTab = "تاپیک AI"
     override val archivedSnapshotNote = "نمایش نتایج ذخیره‌شده از آرشیو"
+    override val threadAiHistoryBanner = "سابقه گفتگوهای AI این رشته پیام"
+    override val noThreadAiHistory = "هنوز گفتگوی AI برای این رشته پیامک ثبت نشده است."
+    override val markAllAsRead = "علامت‌گذاری همه به عنوان خوانده‌شده"
+    override val allMarkedAsRead = "تمام پیام‌ها به عنوان خوانده‌شده علامت‌گذاری شدند"
+    override val openArchiveButton = "آرشیو"
+    override val exportConversation = "خروجی گفتگو (ذخیره محلی)"
+    override val exportAsText = "خروجی متنی خوانا (.txt)"
+    override val exportAsJson = "خروجی ساخت‌یافته (.json)"
+    override val exportCompletedToast = "فایل گفتگو با موفقیت ذخیره شد"
+    override val aiMaxOutputTokensLabel = "حداکثر توکن خروجی"
+    override val capabilitySystemSupported = "System Prompt: پشتیبانی می‌شود"
+    override val capabilitySystemUnsupported = "System Prompt: ادغام در پیام کاربر"
+    override val capabilityTempSupported = "Temperature: پشتیبانی می‌شود"
+    override val capabilityTempUnsupported = "Temperature: حذف خودکار"
+    override val capabilityJsonSupported = "خروجی JSON: پشتیبانی می‌شود"
+    override val aiConstraintsAppliedNote = "محدودیت‌های مدل در حافظه ذخیره و در درخواست‌های بعدی اعمال می‌شوند."
+    override val driveLoopbackPkceButton = "ورود با مرورگر (Loopback PKCE خودکار)"
+    override val driveLoopbackHint = "با Desktop OAuth Client ID نیازی به ثبت SHA-1 نیست و کد ورود به صورت خودکار دریافت می‌شود."
 }
 
 fun englishStrings(): AppStrings = EnglishStrings

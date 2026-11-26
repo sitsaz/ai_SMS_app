@@ -1,14 +1,19 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -35,7 +40,6 @@ import com.example.data.local.SearchHistoryEntity
 import com.example.data.local.SearchSortOrder
 import com.example.data.local.SearchSourceFilter
 import com.example.data.search.SearchResultItem
-import com.example.ui.viewmodel.AiChatArchiveEntry
 import com.example.ui.viewmodel.AiChatDisplayMessage
 import com.example.ui.viewmodel.AiScopeDraft
 import com.example.ui.viewmodel.LocalSearchFilterState
@@ -46,10 +50,7 @@ fun SearchAndAiScreen(
     filterState: LocalSearchFilterState,
     localResults: List<SearchResultItem>,
     recentSearches: List<SearchHistoryEntity> = emptyList(),
-    searchHistory: List<SearchHistoryEntity> = emptyList(),
-    aiChatArchive: List<AiChatArchiveEntry> = emptyList(),
     selectedArchivedSearch: Pair<SearchHistoryEntity, List<SearchResultItem>>? = null,
-    selectedArchivedAiChat: Pair<AiTopicEntity, List<AiChatDisplayMessage>>? = null,
     searchSavedTick: Long = 0L,
     isAiConfigured: Boolean,
     topics: List<AiTopicEntity>,
@@ -72,11 +73,7 @@ fun SearchAndAiScreen(
     onOpenArchivedSearch: (SearchHistoryEntity) -> Unit = {},
     onDismissArchivedSearch: () -> Unit = {},
     onRerunArchivedSearch: (SearchHistoryEntity) -> Unit = {},
-    onDeleteArchivedSearch: (Long) -> Unit = {},
-    onClearSearchHistory: () -> Unit = {},
-    onOpenArchivedAiChat: (Long) -> Unit = {},
-    onDismissArchivedAiChat: () -> Unit = {},
-    onOpenTopicInAiChatScreen: (Long) -> Unit = {},
+    onOpenArchive: () -> Unit = {},
     onSelectTopic: (Long?) -> Unit,
     onNewTopic: () -> Unit,
     onDeleteTopic: (Long) -> Unit,
@@ -95,14 +92,31 @@ fun SearchAndAiScreen(
     var modeIndex by rememberSaveable { mutableIntStateOf(0) }
 
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
                 title = {
                     Text(
-                        text = if (modeIndex == 2) strings.archiveTitle else strings.tabSearch,
+                        text = strings.tabSearch,
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold
                     )
+                },
+                actions = {
+                    FilledTonalButton(
+                        onClick = onOpenArchive,
+                        modifier = Modifier
+                            .padding(end = 12.dp)
+                            .testTag("search_open_archive_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.History,
+                            contentDescription = strings.openArchiveButton,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(strings.openArchiveButton)
+                    }
                 }
             )
         }
@@ -120,7 +134,7 @@ fun SearchAndAiScreen(
                 SegmentedButton(
                     selected = modeIndex == 0,
                     onClick = { modeIndex = 0 },
-                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
+                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
                     icon = { Icon(Icons.Default.Search, contentDescription = null) },
                     modifier = Modifier.testTag("mode_local_search_button")
                 ) {
@@ -129,25 +143,16 @@ fun SearchAndAiScreen(
                 SegmentedButton(
                     selected = modeIndex == 1,
                     onClick = { modeIndex = 1 },
-                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
+                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
                     icon = { Icon(Icons.Default.AutoAwesome, contentDescription = null) },
                     modifier = Modifier.testTag("mode_ai_topics_button")
                 ) {
                     Text(strings.searchModeAiTopics, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                SegmentedButton(
-                    selected = modeIndex == 2,
-                    onClick = { modeIndex = 2 },
-                    shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
-                    icon = { Icon(Icons.Default.History, contentDescription = null) },
-                    modifier = Modifier.testTag("mode_archive_button")
-                ) {
-                    Text(strings.tabArchive, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
             }
 
-            when (modeIndex) {
-                0 -> LocalSearchPane(
+            if (modeIndex == 0) {
+                LocalSearchPane(
                     filterState = filterState,
                     results = localResults,
                     recentSearches = recentSearches,
@@ -162,7 +167,8 @@ fun SearchAndAiScreen(
                     onSelectRecentSearch = { entry -> onOpenArchivedSearch(entry) },
                     onResultClick = onSearchResultClick
                 )
-                1 -> AiTopicsChatPane(
+            } else {
+                AiTopicsChatPane(
                     isAiConfigured = isAiConfigured,
                     topics = topics,
                     activeTopicId = activeTopicId,
@@ -188,39 +194,11 @@ fun SearchAndAiScreen(
                     onOpenSettings = onOpenSettings,
                     onMatchedItemClick = onSearchResultClick
                 )
-                else -> SearchAndAiArchivePane(
-                    searchHistory = searchHistory,
-                    aiChatArchive = aiChatArchive,
-                    selectedArchivedSearch = selectedArchivedSearch,
-                    selectedArchivedAiChat = selectedArchivedAiChat,
-                    onOpenArchivedSearch = onOpenArchivedSearch,
-                    onDismissArchivedSearch = onDismissArchivedSearch,
-                    onRerunSearch = { entry ->
-                        onRerunArchivedSearch(entry)
-                        modeIndex = 0
-                    },
-                    onDeleteArchivedSearch = onDeleteArchivedSearch,
-                    onClearSearchHistory = onClearSearchHistory,
-                    onOpenArchivedAiChat = onOpenArchivedAiChat,
-                    onDismissArchivedAiChat = onDismissArchivedAiChat,
-                    onContinueAiChat = { topic ->
-                        if (topic.originScreen == "AICHAT") {
-                            onOpenTopicInAiChatScreen(topic.id)
-                        } else {
-                            onSelectTopic(topic.id)
-                            modeIndex = 1
-                        }
-                    },
-                    onDeleteAiChatTopic = onDeleteTopic,
-                    onShowExistingXml = onShowExistingXml,
-                    onResultClick = onSearchResultClick
-                )
             }
         }
     }
 
     if (modeIndex == 0 && selectedArchivedSearch != null) {
-        // Ensure clicking a recent search chip in LocalSearchPane displays the saved snapshot sheet
         SearchAndAiArchivePane(
             searchHistory = emptyList(),
             aiChatArchive = emptyList(),

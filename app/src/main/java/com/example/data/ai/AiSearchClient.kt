@@ -17,8 +17,22 @@ data class AiConnectionTestReport(
     val replyPreview: String,
     val supportsFileUpload: Boolean,
     val supportsImageInput: Boolean,
+    val supportsSystemPrompt: Boolean = true,
+    val supportsTemperature: Boolean = true,
+    val supportsJsonMode: Boolean = false,
+    val maxOutputTokens: Int? = null,
     val detectedContextLength: Int?,
     val capabilitySummary: String
+)
+
+private data class ModelSelfReportedLimits(
+    val statusText: String = "OK",
+    val maxContextTokens: Int? = null,
+    val maxOutputTokens: Int? = null,
+    val supportsSystemPrompt: Boolean? = null,
+    val supportsTemperature: Boolean? = null,
+    val supportsJsonMode: Boolean? = null,
+    val supportsVision: Boolean? = null
 )
 
 class AiSearchClient(
@@ -288,7 +302,13 @@ class AiSearchClient(
                     val payload = JSONObject().apply {
                         put("model", settings.aiModelName.trim())
                         put("messages", messagesArray)
-                        put("temperature", 0.2)
+                        put("stream", false)
+                        if (settings.aiSupportsTemperature) {
+                            put("temperature", 0.2)
+                        }
+                        if (settings.aiMaxOutputTokens in 256..32_768) {
+                            put("max_tokens", settings.aiMaxOutputTokens)
+                        }
                     }
                     val resp = service.postChatCompletions(
                         url = chatUrl,
@@ -298,8 +318,7 @@ class AiSearchClient(
                     if (!resp.isSuccessful) {
                         throw IllegalStateException("OpenAI file chat HTTP ${resp.code()}: ${extractErrorMessage(rawBody)}")
                     }
-                    val choices = JSONObject(rawBody).optJSONArray("choices") ?: throw IllegalStateException("No choices")
-                    choices.getJSONObject(0).getJSONObject("message").optString("content", "").trim()
+                    extractOpenAiStyleText(rawBody)
                 } finally {
                     // Best-effort cleanup of temporary archive file on server
                     runCatching { service.deleteOpenAiFile("$filesUrl/$fileId") }
@@ -369,44 +388,97 @@ class AiSearchClient(
                 if (isPersian) "آدرس Base URL باید با http:// یا https:// شروع شود." else "Base URL must start with http:// or https://"
             }
 
-            val reply = executeAiRequest(
-                settings = settings,
-                systemPrompt = "Reply with OK.",
-                priorHistory = emptyList(),
-                userQuestion = "Connection check. Reply with OK.",
-                contextPayload = "No archive attached."
-            )
+            // Probe 0: Ask the model itself via a structured prompt about its limits & supported parameters,
+            // while adaptively detecting if system prompts or temperature are rejected by the gateway.
+            val introspectionSystem = "Reply ONLY with valid JSON reporting your capabilities and token limits."
+            val introspectionPrompt = """
+                Connection test & capability check. Reply ONLY with a single JSON object (no markdown) using these keys:
+                {"status":"OK","max_context_tokens":<int or null>,"max_output_tokens":<int or null>,"supports_system_prompt":<boolean>,"supports_temperature":<boolean>,"supports_json_mode":<boolean>,"supports_vision":<boolean>}
+            """.trimIndent()
 
-            // Probe 1: Inspect model metadata for context length & multimodal capabilities
-            val detectedCtx = probeModelContextLength(settings)
+            var observedSystemSupported = true
+            var observedTempSupported = true
+            val rawReply = try {
+                executeRawUserPrompt(
+                    settings = settings.copy(
+                        aiSupportsSystemPrompt = true,
+                        aiSupportsTemperature = true
+                    ),
+                    systemPrompt = introspectionSystem,
+                    priorHistory = emptyList(),
+                    rawUserContent = introspectionPrompt
+                )
+            } catch (firstErr: Throwable) {
+                val msg = firstErr.message?.lowercase().orEmpty()
+                val tempRejected = msg.contains("temperature")
+                val sysRejected = msg.contains("system") || msg.contains("developer")
+                if (tempRejected || sysRejected) {
+                    if (tempRejected) observedTempSupported = false
+                    if (sysRejected) observedSystemSupported = false
+                    executeRawUserPrompt(
+                        settings = settings.copy(
+                            aiSupportsSystemPrompt = observedSystemSupported,
+                            aiSupportsTemperature = observedTempSupported
+                        ),
+                        systemPrompt = introspectionSystem,
+                        priorHistory = emptyList(),
+                        rawUserContent = introspectionPrompt
+                    )
+                } else {
+                    throw firstErr
+                }
+            }
 
-            // Probe 2: Probe Image Input support with tiny 1x1 PNG
+            val reported = parseModelSelfReportedLimits(rawReply)
+
+            // Probe 1: Inspect endpoint /models metadata for authoritative context length
+            val endpointCtx = probeModelContextLength(settings)
+            val resolvedCtx = endpointCtx ?: reported.maxContextTokens
+            val resolvedMaxOutput = reported.maxOutputTokens?.coerceIn(256, 131_072)
+
+            // Probe 2: Probe Image Input support with tiny 1x1 PNG (fallback to self-report if endpoint skips image)
             val supportsImages = probeImageCapability(settings)
 
-            // Probe 3: Probe File Upload support with tiny XML text snippet (and delete probe file if OpenAI)
+            // Probe 3: Probe File Upload support with tiny XML text snippet
             val supportsFiles = probeFileUploadCapability(settings)
 
+            val finalSupportsSystem = observedSystemSupported && (reported.supportsSystemPrompt ?: true)
+            val finalSupportsTemp = observedTempSupported && (reported.supportsTemperature ?: true)
+            val finalSupportsJson = reported.supportsJsonMode ?: false
+
             val fileText = if (supportsFiles) {
-                if (isPersian) "آپلود فایل: پشتیبانی می‌شود" else "File upload: Supported"
+                if (isPersian) "آپلود فایل: بله" else "File upload: Yes"
             } else {
-                if (isPersian) "آپلود فایل: پشتیبانی نمی‌شود" else "File upload: Not supported"
+                if (isPersian) "آپلود فایل: خیر" else "File upload: No"
             }
             val imgText = if (supportsImages) {
-                if (isPersian) "تصویر: پشتیبانی می‌شود" else "Image input: Supported"
+                if (isPersian) "تصویر: بله" else "Image: Yes"
             } else {
-                if (isPersian) "تصویر: پشتیبانی نمی‌شود" else "Image input: Not supported"
+                if (isPersian) "تصویر: خیر" else "Image: No"
             }
-            val ctxText = detectedCtx?.let {
-                if (isPersian) "کانتکس مدل: $it" else "Model ctx: $it"
+            val ctxText = resolvedCtx?.let {
+                if (isPersian) "کانتکس: $it" else "Ctx: $it"
             }
+            val outText = resolvedMaxOutput?.let {
+                if (isPersian) "خروجی: $it" else "MaxOut: $it"
+            }
+            val paramNotes = buildList {
+                if (!finalSupportsSystem) add(if (isPersian) "بدون System" else "No-System")
+                if (!finalSupportsTemp) add(if (isPersian) "بدون Temp" else "Fixed-Temp")
+                if (finalSupportsJson) add("JSON")
+            }.joinToString(", ").takeIf { it.isNotBlank() }
 
-            val summary = listOfNotNull(fileText, imgText, ctxText).joinToString(" • ")
+            val summary = listOfNotNull(fileText, imgText, ctxText, outText, paramNotes).joinToString(" • ")
 
             AiConnectionTestReport(
-                replyPreview = reply.take(80),
+                replyPreview = reported.statusText.ifBlank { rawReply.take(80) },
                 supportsFileUpload = supportsFiles,
                 supportsImageInput = supportsImages,
-                detectedContextLength = detectedCtx,
+                supportsSystemPrompt = finalSupportsSystem,
+                supportsTemperature = finalSupportsTemp,
+                supportsJsonMode = finalSupportsJson,
+                maxOutputTokens = resolvedMaxOutput,
+                detectedContextLength = resolvedCtx,
                 capabilitySummary = summary
             )
         }
@@ -681,47 +753,85 @@ Only include <match> elements whose id (e.g. sms:123 or notif:45) actually appea
         val url = buildOpenAiChatUrl(settings.aiBaseUrl)
         require(isValidHttpUrl(url)) { "Base URL must start with http:// or https://" }
 
-        val messagesArray = JSONArray()
-        messagesArray.put(JSONObject().apply {
-            put("role", "system")
-            put("content", systemPrompt)
-        })
-
-        for (msg in priorHistory.takeLast(6)) {
-            if (msg.isError) continue
-            val role = if (msg.role == "USER") "user" else "assistant"
-            messagesArray.put(JSONObject().apply {
-                put("role", role)
-                put("content", msg.text)
-            })
-        }
-
-        messagesArray.put(JSONObject().apply {
-            put("role", "user")
-            put("content", rawUserContent)
-        })
-
-        val payload = JSONObject().apply {
-            put("model", settings.aiModelName.trim())
-            put("messages", messagesArray)
-            put("temperature", 0.2)
-        }
-
         val service = retrofitProvider.provideAiService(settings)
-        val response = service.postChatCompletions(
-            url = url,
-            body = payload.toString().toRequestBody(jsonMediaType)
-        )
-        val rawBody = response.body()?.string() ?: response.errorBody()?.string().orEmpty()
-        if (!response.isSuccessful) {
-            throw IllegalStateException("HTTP ${response.code()}: ${extractErrorMessage(rawBody)}")
+
+        suspend fun sendWithFlags(
+            useSystemRole: Boolean,
+            useTemperature: Boolean,
+            includeMaxTokens: Boolean
+        ): Pair<Int, String> {
+            val messagesArray = JSONArray()
+            if (useSystemRole && systemPrompt.isNotBlank()) {
+                messagesArray.put(JSONObject().apply {
+                    put("role", "system")
+                    put("content", systemPrompt)
+                })
+            }
+
+            for (msg in priorHistory.takeLast(6)) {
+                if (msg.isError) continue
+                val role = if (msg.role == "USER") "user" else "assistant"
+                messagesArray.put(JSONObject().apply {
+                    put("role", role)
+                    put("content", msg.text)
+                })
+            }
+
+            val effectiveUserContent = if (!useSystemRole && systemPrompt.isNotBlank()) {
+                "$systemPrompt\n\n$rawUserContent"
+            } else {
+                rawUserContent
+            }
+
+            messagesArray.put(JSONObject().apply {
+                put("role", "user")
+                put("content", effectiveUserContent)
+            })
+
+            val payload = JSONObject().apply {
+                put("model", settings.aiModelName.trim())
+                put("messages", messagesArray)
+                put("stream", false)
+                if (useTemperature) {
+                    put("temperature", 0.2)
+                }
+                if (includeMaxTokens && settings.aiMaxOutputTokens in 256..32_768) {
+                    put("max_tokens", settings.aiMaxOutputTokens)
+                }
+            }
+
+            val response = service.postChatCompletions(
+                url = url,
+                body = payload.toString().toRequestBody(jsonMediaType)
+            )
+            val rawBody = response.body()?.string() ?: response.errorBody()?.string().orEmpty()
+            return response.code() to (if (response.isSuccessful) rawBody else "__HTTP_ERROR__$rawBody")
         }
-        val json = JSONObject(rawBody)
-        val choices = json.optJSONArray("choices")
-            ?: throw IllegalStateException("Missing choices in API response")
-        if (choices.length() == 0) throw IllegalStateException("Empty choices from AI API")
-        val message = choices.getJSONObject(0).getJSONObject("message")
-        return message.optString("content", "").trim()
+
+        var useSys = settings.aiSupportsSystemPrompt
+        var useTemp = settings.aiSupportsTemperature
+        var useMaxOut = true
+
+        var (code, body) = sendWithFlags(useSys, useTemp, useMaxOut)
+        if (body.startsWith("__HTTP_ERROR__")) {
+            val errRaw = body.removePrefix("__HTTP_ERROR__")
+            val errLower = errRaw.lowercase()
+            val retryable = code == 400 || code == 422
+            if (retryable && (errLower.contains("temperature") || errLower.contains("system") || errLower.contains("max_tokens"))) {
+                if (errLower.contains("temperature")) useTemp = false
+                if (errLower.contains("system")) useSys = false
+                if (errLower.contains("max_tokens")) useMaxOut = false
+                val retryRes = sendWithFlags(useSys, useTemp, useMaxOut)
+                code = retryRes.first
+                body = retryRes.second
+            }
+        }
+
+        if (body.startsWith("__HTTP_ERROR__")) {
+            val errRaw = body.removePrefix("__HTTP_ERROR__")
+            throw IllegalStateException("HTTP $code: ${extractErrorMessage(errRaw)}")
+        }
+        return extractOpenAiStyleText(body)
     }
 
     private suspend fun callGeminiRest(
@@ -749,18 +859,31 @@ Only include <match> elements whose id (e.g. sms:123 or notif:45) actually appea
             })
         }
 
+        val effectiveUserText = if (!settings.aiSupportsSystemPrompt && systemPrompt.isNotBlank()) {
+            "$systemPrompt\n\n$rawUserContent"
+        } else {
+            rawUserContent
+        }
+
         contents.put(JSONObject().apply {
             put("role", "user")
-            put("parts", JSONArray().put(JSONObject().put("text", rawUserContent)))
+            put("parts", JSONArray().put(JSONObject().put("text", effectiveUserText)))
         })
 
         val payload = JSONObject().apply {
-            put("systemInstruction", JSONObject().apply {
-                put("parts", JSONArray().put(JSONObject().put("text", systemPrompt)))
-            })
+            if (settings.aiSupportsSystemPrompt && systemPrompt.isNotBlank()) {
+                put("systemInstruction", JSONObject().apply {
+                    put("parts", JSONArray().put(JSONObject().put("text", systemPrompt)))
+                })
+            }
             put("contents", contents)
             put("generationConfig", JSONObject().apply {
-                put("temperature", 0.2)
+                if (settings.aiSupportsTemperature) {
+                    put("temperature", 0.2)
+                }
+                if (settings.aiMaxOutputTokens in 256..65_536) {
+                    put("maxOutputTokens", settings.aiMaxOutputTokens)
+                }
             })
         }
 
@@ -774,13 +897,49 @@ Only include <match> elements whose id (e.g. sms:123 or notif:45) actually appea
         if (!response.isSuccessful) {
             throw IllegalStateException("HTTP ${response.code()}: ${extractErrorMessage(rawBody)}")
         }
-        val json = JSONObject(rawBody)
-        val candidates = json.optJSONArray("candidates")
-            ?: throw IllegalStateException("Missing candidates in Gemini response")
-        if (candidates.length() == 0) throw IllegalStateException("Empty candidates from Gemini API")
-        val content = candidates.getJSONObject(0).getJSONObject("content")
-        val parts = content.getJSONArray("parts")
-        return parts.getJSONObject(0).optString("text", "").trim()
+        return extractOpenAiStyleText(rawBody)
+    }
+
+    private fun parseModelSelfReportedLimits(rawText: String): ModelSelfReportedLimits {
+        val cleaned = rawText
+            .replace(Regex("```json\\s*", RegexOption.IGNORE_CASE), "")
+            .replace("```", "")
+            .trim()
+        val startIdx = cleaned.indexOf('{')
+        val endIdx = cleaned.lastIndexOf('}')
+        if (startIdx >= 0 && endIdx > startIdx) {
+            val jsonSub = cleaned.substring(startIdx, endIdx + 1)
+            val parsed = runCatching { JSONObject(jsonSub) }.getOrNull()
+            if (parsed != null) {
+                val status = parsed.optString("status").ifBlank { "OK" }
+                val ctx = listOf("max_context_tokens", "context_length", "context_window")
+                    .firstNotNullOfOrNull { k -> parsed.optInt(k, -1).takeIf { it >= 1_024 } }
+                val maxOut = listOf("max_output_tokens", "max_tokens")
+                    .firstNotNullOfOrNull { k -> parsed.optInt(k, -1).takeIf { it >= 256 } }
+                val sys = if (parsed.has("supports_system_prompt") && !parsed.isNull("supports_system_prompt")) {
+                    parsed.optBoolean("supports_system_prompt")
+                } else null
+                val temp = if (parsed.has("supports_temperature") && !parsed.isNull("supports_temperature")) {
+                    parsed.optBoolean("supports_temperature")
+                } else null
+                val jsonMode = if (parsed.has("supports_json_mode") && !parsed.isNull("supports_json_mode")) {
+                    parsed.optBoolean("supports_json_mode")
+                } else null
+                val vision = if (parsed.has("supports_vision") && !parsed.isNull("supports_vision")) {
+                    parsed.optBoolean("supports_vision")
+                } else null
+                return ModelSelfReportedLimits(
+                    statusText = status,
+                    maxContextTokens = ctx,
+                    maxOutputTokens = maxOut,
+                    supportsSystemPrompt = sys,
+                    supportsTemperature = temp,
+                    supportsJsonMode = jsonMode,
+                    supportsVision = vision
+                )
+            }
+        }
+        return ModelSelfReportedLimits(statusText = cleaned.take(80).ifBlank { "OK" })
     }
 
     private fun shouldRetryCondensed(err: Throwable): Boolean {
@@ -820,13 +979,177 @@ Only include <match> elements whose id (e.g. sms:123 or notif:45) actually appea
     private fun extractErrorMessage(rawBody: String): String {
         return runCatching {
             val obj = JSONObject(rawBody)
-            obj.optJSONObject("error")?.optString("message")
-                ?.takeIf { it.isNotBlank() }
-                ?: rawBody.take(180)
-        }.getOrDefault(rawBody.take(180))
+            obj.optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
+                ?: obj.optString("error").takeIf { it.isNotBlank() && !it.startsWith("{") }
+                ?: obj.optString("message").takeIf { it.isNotBlank() }
+                ?: obj.optString("detail").takeIf { it.isNotBlank() }
+                ?: rawBody.take(220)
+        }.getOrDefault(rawBody.take(220))
     }
 
     companion object {
+        /**
+         * Resiliently extracts assistant reply text from standard OpenAI Chat Completions,
+         * wrapped gateway envelopes (data/response/result.choices), OpenAI Responses API
+         * (output_text / output), Anthropic (content[]), Gemini (candidates[]), SSE streams,
+         * or simple text/message/answer objects.
+         */
+        fun extractOpenAiStyleText(rawBody: String): String {
+            val trimmed = rawBody.trim()
+            if (trimmed.isEmpty()) {
+                throw IllegalStateException("Empty response body from AI API")
+            }
+
+            // 1. Handle SSE streaming payloads (data: {...}) if gateway streams even with stream=false
+            if (trimmed.startsWith("data:") || trimmed.lineSequence().any { it.trimStart().startsWith("data:") }) {
+                val assembled = StringBuilder()
+                for (line in trimmed.lineSequence()) {
+                    val t = line.trim()
+                    if (!t.startsWith("data:")) continue
+                    val chunk = t.removePrefix("data:").trim()
+                    if (chunk == "[DONE]" || chunk.isEmpty()) continue
+                    runCatching { JSONObject(chunk) }.getOrNull()?.let { obj ->
+                        extractFromJsonObject(obj)?.let { assembled.append(it) }
+                    }
+                }
+                val text = assembled.toString().trim()
+                if (text.isNotEmpty()) return text
+            }
+
+            // 2. JSON array root
+            if (trimmed.startsWith("[")) {
+                val arr = runCatching { JSONArray(trimmed) }.getOrNull()
+                if (arr != null && arr.length() > 0) {
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        extractFromJsonObject(obj)?.let { if (it.isNotBlank()) return it.trim() }
+                    }
+                }
+            }
+
+            // 3. JSON object root
+            if (trimmed.startsWith("{")) {
+                val json = JSONObject(trimmed)
+
+                // Check for API-level errors returned with HTTP 200
+                if (json.has("error") && !json.isNull("error")) {
+                    val errMsg = runCatching {
+                        json.optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
+                            ?: json.optString("error").takeIf { it.isNotBlank() }
+                    }.getOrNull() ?: trimmed.take(200)
+                    throw IllegalStateException("API Error: $errMsg")
+                }
+                if (json.has("status") && json.opt("status") == false && json.has("message")) {
+                    throw IllegalStateException("API Error: ${json.optString("message")}")
+                }
+
+                extractFromJsonObject(json)?.let { if (it.isNotBlank()) return it.trim() }
+
+                val keys = json.keys().asSequence().toList().joinToString(", ")
+                throw IllegalStateException("Unexpected API response format (keys: $keys): ${trimmed.take(180)}")
+            }
+
+            // 4. Reject HTML error pages cleanly
+            if (trimmed.startsWith("<html", ignoreCase = true) || trimmed.startsWith("<!doctype", ignoreCase = true)) {
+                throw IllegalStateException("API returned an HTML page instead of JSON (check Base URL)")
+            }
+
+            return trimmed
+        }
+
+        private fun extractFromJsonObject(json: JSONObject): String? {
+            // Check nested wrappers commonly used by API gateways
+            val containers = listOfNotNull(
+                json,
+                json.optJSONObject("data"),
+                json.optJSONObject("response"),
+                json.optJSONObject("result"),
+                json.optJSONObject("body")
+            )
+
+            for (obj in containers) {
+                // OpenAI choices[]
+                val choices = obj.optJSONArray("choices")
+                if (choices != null && choices.length() > 0) {
+                    val first = choices.optJSONObject(0)
+                    if (first != null) {
+                        val messageObj = first.optJSONObject("message")
+                        if (messageObj != null) {
+                            extractContentField(messageObj.opt("content"))?.let { return it }
+                            messageObj.optString("reasoning_content").takeIf { it.isNotBlank() }?.let { return it }
+                        }
+                        val deltaObj = first.optJSONObject("delta")
+                        if (deltaObj != null) {
+                            extractContentField(deltaObj.opt("content"))?.let { return it }
+                            deltaObj.optString("text").takeIf { it.isNotBlank() }?.let { return it }
+                        }
+                        first.optString("text").takeIf { it.isNotBlank() }?.let { return it }
+                        extractContentField(first.opt("content"))?.let { return it }
+                    }
+                }
+
+                // Gemini candidates[]
+                val candidates = obj.optJSONArray("candidates")
+                if (candidates != null && candidates.length() > 0) {
+                    val c0 = candidates.optJSONObject(0)
+                    val parts = c0?.optJSONObject("content")?.optJSONArray("parts")
+                    if (parts != null && parts.length() > 0) {
+                        val combined = buildString {
+                            for (i in 0 until parts.length()) {
+                                val t = parts.optJSONObject(i)?.optString("text").orEmpty()
+                                if (t.isNotEmpty()) append(t)
+                            }
+                        }
+                        if (combined.isNotBlank()) return combined
+                    }
+                }
+
+                // OpenAI Responses API: output_text or output[]
+                obj.optString("output_text").takeIf { it.isNotBlank() }?.let { return it }
+                val outputArr = obj.optJSONArray("output")
+                if (outputArr != null && outputArr.length() > 0) {
+                    val combined = buildString {
+                        for (i in 0 until outputArr.length()) {
+                            val outItem = outputArr.optJSONObject(i) ?: continue
+                            val c = extractContentField(outItem.opt("content"))
+                            if (!c.isNullOrBlank()) append(c)
+                        }
+                    }
+                    if (combined.isNotBlank()) return combined
+                }
+
+                // Anthropic Messages / generic content[] or string fields
+                extractContentField(obj.opt("content"))?.let { return it }
+                obj.optJSONObject("message")?.let { mObj ->
+                    extractContentField(mObj.opt("content"))?.let { return it }
+                }
+                listOf("answer", "reply", "response", "text", "output", "result", "message").forEach { key ->
+                    val v = obj.opt(key)
+                    if (v is String && v.isNotBlank()) return v
+                }
+            }
+            return null
+        }
+
+        private fun extractContentField(raw: Any?): String? {
+            return when (raw) {
+                is String -> raw.takeIf { it.isNotBlank() }
+                is JSONArray -> {
+                    val sb = StringBuilder()
+                    for (i in 0 until raw.length()) {
+                        when (val el = raw.opt(i)) {
+                            is String -> sb.append(el)
+                            is JSONObject -> {
+                                val t = el.optString("text").ifBlank { el.optString("content") }
+                                if (t.isNotBlank()) sb.append(t)
+                            }
+                        }
+                    }
+                    sb.toString().takeIf { it.isNotBlank() }
+                }
+                else -> null
+            }
+        }
         fun isValidHttpUrl(rawUrl: String): Boolean {
             val clean = rawUrl.trim()
             if (!clean.startsWith("http://", ignoreCase = true) &&

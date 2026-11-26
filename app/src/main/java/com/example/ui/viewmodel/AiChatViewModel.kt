@@ -9,6 +9,8 @@ import com.example.core.localization.DateUtils
 import com.example.data.ai.AiXmlResponseParser
 import com.example.data.ai.ContextBudgetCalculator
 import com.example.data.ai.XmlArchiveBuildResult
+import com.example.data.archive.ConversationExportFormat
+import com.example.data.archive.ConversationExportFormatter
 import com.example.data.local.AiChatContextSource
 import com.example.data.local.AiChatMessageEntity
 import com.example.data.local.AiContextMode
@@ -21,6 +23,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -59,7 +62,7 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
     private val container = (application as AiSmsApplication).container
     private val smsDao = container.database.smsDao()
     private val notificationDao = container.database.notificationDao()
-    private val aiTopicDao = container.database.aiTopicDao()
+    private val chatArchiveRepo = container.chatArchiveRepository
     private val xmlBuilder = container.xmlArchiveBuilder
     private val aiClient = container.aiSearchClient
     private val settingsRepo = container.settingsRepository
@@ -97,7 +100,7 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
             if (id == null) {
                 flowOf(emptyList())
             } else {
-                aiTopicDao.observeMessagesForTopic(id).map { list ->
+                chatArchiveRepo.observeMessagesForTopic(id).map { list ->
                     list.map { entity ->
                         val parsed = AiXmlResponseParser.decodeFromJson(entity.structuredJson)
                         val refs = entity.matchedRefsCsv
@@ -116,8 +119,8 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val archivedSessions: StateFlow<List<AiChatArchiveSummary>> = combine(
-        aiTopicDao.observeTopics(),
-        aiTopicDao.observeAllChatMessages()
+        chatArchiveRepo.observeTopics(),
+        chatArchiveRepo.observeAllChatMessages()
     ) { topics, allMsgs ->
         val byTopic = allMsgs.groupBy { it.topicId }
         topics.map { topic ->
@@ -179,7 +182,7 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
 
     fun loadArchivedSession(topicId: Long) {
         viewModelScope.launch {
-            val topic = aiTopicDao.getTopicById(topicId) ?: return@launch
+            val topic = chatArchiveRepo.getTopicById(topicId) ?: return@launch
             val restoredSource = runCatching { AiChatContextSource.valueOf(topic.contextSource) }
                 .getOrElse {
                     when {
@@ -207,7 +210,7 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
 
     fun deleteArchivedSession(topicId: Long) {
         viewModelScope.launch {
-            aiTopicDao.deleteTopic(topicId)
+            chatArchiveRepo.deleteTopic(topicId)
             if (_activeSessionTopicId.value == topicId) {
                 _activeSessionTopicId.value = null
             }
@@ -281,7 +284,8 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
                 smartContextBudget = cfg.smartContextEnabled,
                 contextLimitTokens = settings.aiContextLimitTokens,
                 priorHistoryTokens = 0,
-                preferFileUpload = cfg.smartContextEnabled && settings.aiSupportsFileUpload
+                preferFileUpload = cfg.smartContextEnabled && settings.aiSupportsFileUpload,
+                maxOutputTokens = settings.aiMaxOutputTokens
             )
             _xmlPreview.value = XmlArchiveBuildResult(
                 xmlContent = result.fileUploadXmlPayload ?: result.xmlPrompt,
@@ -317,6 +321,15 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
         _xmlPreview.value = null
     }
 
+    suspend fun exportTopic(
+        topicId: Long,
+        format: ConversationExportFormat,
+        isPersian: Boolean
+    ): String? {
+        val twm = chatArchiveRepo.observeTopicWithMessages(topicId).first() ?: return null
+        return ConversationExportFormatter.formatAiChatTopic(twm, format, isPersian)
+    }
+
     fun sendMessage(question: String, isPersian: Boolean, strings: AppStrings) {
         val cleanQuestion = question.trim()
         if (cleanQuestion.isEmpty() || _isSending.value) return
@@ -341,7 +354,7 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
                         AiChatContextSource.NOTIFICATION_HISTORY -> selectedAppLabel ?: strings.sourceNotificationHistory
                         AiChatContextSource.COMBINED_ARCHIVE -> strings.sourceCombinedArchive
                     }
-                    topicId = aiTopicDao.insertTopic(
+                    topicId = chatArchiveRepo.insertTopic(
                         AiTopicEntity(
                             title = "$titlePrefix: ${cleanQuestion.take(28)}",
                             createdAt = now,
@@ -362,7 +375,7 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
                     _activeSessionTopicId.value = topicId
                 }
 
-                val priorHistory = aiTopicDao.getMessagesForTopicOnce(topicId)
+                val priorHistory = chatArchiveRepo.getMessagesForTopicOnce(topicId)
                 val priorTokens = priorHistory.takeLast(6).sumOf {
                     ContextBudgetCalculator.estimateTokens(it.text)
                 }
@@ -383,7 +396,8 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
                     smartContextBudget = cfg.smartContextEnabled,
                     contextLimitTokens = settings.aiContextLimitTokens,
                     priorHistoryTokens = priorTokens,
-                    preferFileUpload = cfg.smartContextEnabled && settings.aiSupportsFileUpload
+                    preferFileUpload = cfg.smartContextEnabled && settings.aiSupportsFileUpload,
+                    maxOutputTokens = settings.aiMaxOutputTokens
                 )
 
                 val kb = String.format(java.util.Locale.US, "%.1f KB", promptResult.totalBytes / 1024.0)
@@ -400,7 +414,7 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
                     "${promptResult.sourceLabel} • $countLabel • $kb XML"
                 }
 
-                aiTopicDao.insertChatMessage(
+                chatArchiveRepo.insertChatMessage(
                     AiChatMessageEntity(
                         topicId = topicId,
                         role = "USER",
@@ -422,7 +436,7 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
                 )
 
                 aiResult.onSuccess { parsed ->
-                    aiTopicDao.insertChatMessage(
+                    chatArchiveRepo.insertChatMessage(
                         AiChatMessageEntity(
                             topicId = topicId,
                             role = "ASSISTANT",
@@ -434,7 +448,7 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     )
                 }.onFailure { err ->
-                    aiTopicDao.insertChatMessage(
+                    chatArchiveRepo.insertChatMessage(
                         AiChatMessageEntity(
                             topicId = topicId,
                             role = "ASSISTANT",
@@ -445,8 +459,8 @@ class AiChatViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 }
 
-                aiTopicDao.getTopicById(topicId)?.let { t ->
-                    aiTopicDao.updateTopic(
+                chatArchiveRepo.getTopicById(topicId)?.let { t ->
+                    chatArchiveRepo.updateTopic(
                         t.copy(
                             updatedAt = System.currentTimeMillis(),
                             rangePreset = cfg.preset.name,

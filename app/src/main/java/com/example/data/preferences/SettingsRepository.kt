@@ -37,8 +37,12 @@ data class AppSettings(
     val aiModelName: String = "gpt-4o-mini",
     val aiApiKey: String = "",
     val aiContextLimitTokens: Int = 32_000,
+    val aiMaxOutputTokens: Int = 4_096,
     val aiSupportsFileUpload: Boolean = false,
     val aiSupportsImageInput: Boolean = false,
+    val aiSupportsSystemPrompt: Boolean = true,
+    val aiSupportsTemperature: Boolean = true,
+    val aiSupportsJsonMode: Boolean = false,
     val aiCapabilitiesChecked: Boolean = false,
     val aiCapabilitiesDetail: String = "",
     val smsNotificationsEnabled: Boolean = true,
@@ -77,8 +81,12 @@ class SettingsRepository(private val context: Context) {
         val AI_MODEL = stringPreferencesKey("ai_model")
         val AI_API_KEY_ENC = stringPreferencesKey("ai_api_key_enc")
         val AI_CONTEXT_LIMIT_TOKENS = intPreferencesKey("ai_context_limit_tokens")
+        val AI_MAX_OUTPUT_TOKENS = intPreferencesKey("ai_max_output_tokens")
         val AI_SUPPORTS_FILE_UPLOAD = booleanPreferencesKey("ai_supports_file_upload")
         val AI_SUPPORTS_IMAGE_INPUT = booleanPreferencesKey("ai_supports_image_input")
+        val AI_SUPPORTS_SYSTEM_PROMPT = booleanPreferencesKey("ai_supports_system_prompt")
+        val AI_SUPPORTS_TEMPERATURE = booleanPreferencesKey("ai_supports_temperature")
+        val AI_SUPPORTS_JSON_MODE = booleanPreferencesKey("ai_supports_json_mode")
         val AI_CAPABILITIES_CHECKED = booleanPreferencesKey("ai_capabilities_checked")
         val AI_CAPABILITIES_DETAIL = stringPreferencesKey("ai_capabilities_detail")
         val SMS_NOTIFICATIONS_ENABLED = booleanPreferencesKey("sms_notifications_enabled")
@@ -135,8 +143,12 @@ class SettingsRepository(private val context: Context) {
             aiModelName = prefs[Keys.AI_MODEL] ?: defaultModelFor(provider),
             aiApiKey = decryptedKey,
             aiContextLimitTokens = (prefs[Keys.AI_CONTEXT_LIMIT_TOKENS] ?: 32_000).coerceIn(1_024, 2_000_000),
+            aiMaxOutputTokens = (prefs[Keys.AI_MAX_OUTPUT_TOKENS] ?: 4_096).coerceIn(256, 131_072),
             aiSupportsFileUpload = prefs[Keys.AI_SUPPORTS_FILE_UPLOAD] ?: false,
             aiSupportsImageInput = prefs[Keys.AI_SUPPORTS_IMAGE_INPUT] ?: false,
+            aiSupportsSystemPrompt = prefs[Keys.AI_SUPPORTS_SYSTEM_PROMPT] ?: true,
+            aiSupportsTemperature = prefs[Keys.AI_SUPPORTS_TEMPERATURE] ?: true,
+            aiSupportsJsonMode = prefs[Keys.AI_SUPPORTS_JSON_MODE] ?: false,
             aiCapabilitiesChecked = prefs[Keys.AI_CAPABILITIES_CHECKED] ?: false,
             aiCapabilitiesDetail = prefs[Keys.AI_CAPABILITIES_DETAIL].orEmpty(),
             smsNotificationsEnabled = prefs[Keys.SMS_NOTIFICATIONS_ENABLED] ?: true,
@@ -282,13 +294,27 @@ class SettingsRepository(private val context: Context) {
     suspend fun saveAiCapabilities(
         supportsFileUpload: Boolean,
         supportsImageInput: Boolean,
+        supportsSystemPrompt: Boolean = true,
+        supportsTemperature: Boolean = true,
+        supportsJsonMode: Boolean = false,
+        maxOutputTokens: Int? = null,
+        detectedContextLimit: Int? = null,
         detail: String
     ) {
         context.appSettingsDataStore.edit { prefs ->
             prefs[Keys.AI_SUPPORTS_FILE_UPLOAD] = supportsFileUpload
             prefs[Keys.AI_SUPPORTS_IMAGE_INPUT] = supportsImageInput
+            prefs[Keys.AI_SUPPORTS_SYSTEM_PROMPT] = supportsSystemPrompt
+            prefs[Keys.AI_SUPPORTS_TEMPERATURE] = supportsTemperature
+            prefs[Keys.AI_SUPPORTS_JSON_MODE] = supportsJsonMode
+            if (maxOutputTokens != null && maxOutputTokens >= 256) {
+                prefs[Keys.AI_MAX_OUTPUT_TOKENS] = maxOutputTokens.coerceIn(256, 131_072)
+            }
+            if (detectedContextLimit != null && detectedContextLimit >= 1_024) {
+                prefs[Keys.AI_CONTEXT_LIMIT_TOKENS] = detectedContextLimit.coerceIn(1_024, 2_000_000)
+            }
             prefs[Keys.AI_CAPABILITIES_CHECKED] = true
-            prefs[Keys.AI_CAPABILITIES_DETAIL] = detail.take(300)
+            prefs[Keys.AI_CAPABILITIES_DETAIL] = detail.take(500)
         }
     }
 
@@ -298,8 +324,12 @@ class SettingsRepository(private val context: Context) {
             prefs.remove(Keys.AI_BASE_URL)
             prefs.remove(Keys.AI_MODEL)
             prefs.remove(Keys.AI_API_KEY_ENC)
+            prefs.remove(Keys.AI_MAX_OUTPUT_TOKENS)
             prefs.remove(Keys.AI_SUPPORTS_FILE_UPLOAD)
             prefs.remove(Keys.AI_SUPPORTS_IMAGE_INPUT)
+            prefs.remove(Keys.AI_SUPPORTS_SYSTEM_PROMPT)
+            prefs.remove(Keys.AI_SUPPORTS_TEMPERATURE)
+            prefs.remove(Keys.AI_SUPPORTS_JSON_MODE)
             prefs.remove(Keys.AI_CAPABILITIES_CHECKED)
             prefs.remove(Keys.AI_CAPABILITIES_DETAIL)
         }

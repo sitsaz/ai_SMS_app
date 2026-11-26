@@ -21,6 +21,8 @@ import com.example.data.local.DeliveryStatus
 import com.example.data.local.PinnedThreadEntity
 import com.example.data.local.SmsDao
 import com.example.data.local.SmsMessage
+import com.example.data.local.SmsThreadDao
+import com.example.data.local.SmsThreadEntity
 import com.example.data.preferences.SettingsRepository
 import com.example.sms.SmsSenderManager
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +32,7 @@ import kotlinx.coroutines.withContext
 class SmsRepository(
     private val context: Context,
     private val smsDao: SmsDao,
+    private val smsThreadDao: SmsThreadDao? = null,
     private val contactsRepository: ContactsRepository,
     private val senderManager: SmsSenderManager,
     private val settingsRepository: SettingsRepository
@@ -43,11 +46,12 @@ class SmsRepository(
     fun observePinnedMessagesInThread(threadId: Long): Flow<List<SmsMessage>> =
         smsDao.observePinnedMessagesInThread(threadId)
 
-    suspend fun syncFromSystemInbox(): Int = withContext(Dispatchers.IO) {
+    suspend fun syncFromSystemInbox(limit: Int? = null): Int = withContext(Dispatchers.IO) {
         if (!AndroidCompat.hasPermission(context, Manifest.permission.READ_SMS)) {
             return@withContext 0
         }
         val contactMap = contactsRepository.buildLookupMap()
+        val pinnedBySysId = smsDao.getPinnedSystemSmsMeta().associateBy { it.systemSmsId }
         val imported = mutableListOf<SmsMessage>()
 
         val projection = arrayOf(
@@ -62,12 +66,17 @@ class SmsRepository(
         )
 
         runCatching {
+            val sortOrder = if (limit != null && limit > 0) {
+                "${Telephony.Sms.DATE} DESC LIMIT $limit"
+            } else {
+                "${Telephony.Sms.DATE} DESC"
+            }
             context.contentResolver.query(
                 Telephony.Sms.CONTENT_URI,
                 projection,
                 null,
                 null,
-                "${Telephony.Sms.DATE} DESC"
+                sortOrder
             )?.use { cursor ->
                 val idIdx = cursor.getColumnIndexOrThrow(Telephony.Sms._ID)
                 val threadIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.THREAD_ID)
@@ -101,6 +110,7 @@ class SmsRepository(
                     }
 
                     val resolvedName = contactMap[normalized]
+                    val pinnedMeta = pinnedBySysId[sysId]
                     imported.add(
                         SmsMessage(
                             systemSmsId = sysId,
@@ -113,7 +123,9 @@ class SmsRepository(
                             timestamp = date,
                             isOutgoing = isOutgoing,
                             deliveryStatus = deliveryStatus.name,
-                            isRead = isRead
+                            isRead = isRead,
+                            isPinned = pinnedMeta?.isPinned ?: false,
+                            pinnedAt = pinnedMeta?.pinnedAt ?: 0L
                         )
                     )
                 }
@@ -123,13 +135,17 @@ class SmsRepository(
         }
 
         if (imported.isNotEmpty()) {
-            // Preserve locally tracked DELIVERED statuses where system SMS provider hasn't updated
             for (batch in imported.chunked(300)) {
                 smsDao.upsertAll(batch)
+            }
+            for (tid in imported.map { it.threadId }.distinct()) {
+                syncThreadSummary(tid)
             }
         }
         imported.size
     }
+
+    suspend fun syncRecentChanges(limit: Int = 80): Int = syncFromSystemInbox(limit = limit)
 
     suspend fun resolveOrCreateThreadId(address: String): Long = withContext(Dispatchers.IO) {
         val normalized = ContactsRepository.normalizeNumberKey(address)
@@ -196,9 +212,11 @@ class SmsRepository(
         val sendResult = senderManager.sendSms(localId, cleanAddress, cleanBody)
         if (sendResult.isFailure) {
             smsDao.updateDeliveryStatus(localId, DeliveryStatus.FAILED.name)
+            syncThreadSummary(threadId)
             return@withContext Result.failure(sendResult.exceptionOrNull() ?: Exception("SMS send failed"))
         }
 
+        syncThreadSummary(threadId)
         Result.success(threadId)
     }
 
@@ -243,6 +261,8 @@ class SmsRepository(
                 isRead = false
             )
         )
+
+        syncThreadSummary(threadId)
 
         postIncomingSmsNotification(
             threadId = threadId,
@@ -324,6 +344,7 @@ class SmsRepository(
 
     suspend fun markThreadRead(threadId: Long) = withContext(Dispatchers.IO) {
         smsDao.markThreadRead(threadId)
+        smsThreadDao?.markThreadRead(threadId)
         if (AndroidCompat.isDefaultSmsApp(context)) {
             runCatching {
                 val values = ContentValues().apply { put(Telephony.Sms.READ, 1) }
@@ -337,8 +358,25 @@ class SmsRepository(
         }
     }
 
+    suspend fun markAllMessagesRead() = withContext(Dispatchers.IO) {
+        smsDao.markAllMessagesRead()
+        smsThreadDao?.markAllThreadsRead()
+        if (AndroidCompat.isDefaultSmsApp(context)) {
+            runCatching {
+                val values = ContentValues().apply { put(Telephony.Sms.READ, 1) }
+                context.contentResolver.update(
+                    Telephony.Sms.CONTENT_URI,
+                    values,
+                    "${Telephony.Sms.READ} = 0",
+                    null
+                )
+            }
+        }
+    }
+
     suspend fun deleteMessage(message: SmsMessage) = withContext(Dispatchers.IO) {
         smsDao.deleteMessageById(message.id)
+        syncThreadSummary(message.threadId)
         if (AndroidCompat.isDefaultSmsApp(context) && message.systemSmsId != null) {
             runCatching {
                 context.contentResolver.delete(
@@ -353,6 +391,7 @@ class SmsRepository(
     suspend fun deleteThread(threadId: Long) = withContext(Dispatchers.IO) {
         smsDao.unpinThread(threadId)
         smsDao.deleteThread(threadId)
+        smsThreadDao?.deleteThread(threadId)
         if (AndroidCompat.isDefaultSmsApp(context)) {
             runCatching {
                 context.contentResolver.delete(
@@ -373,10 +412,46 @@ class SmsRepository(
     }
 
     suspend fun setThreadPinned(threadId: Long, pinned: Boolean) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
         if (pinned) {
-            smsDao.pinThread(PinnedThreadEntity(threadId = threadId, pinnedAt = System.currentTimeMillis()))
+            smsDao.pinThread(PinnedThreadEntity(threadId = threadId, pinnedAt = now))
+            smsThreadDao?.updateThreadPin(threadId, true, now, now)
         } else {
             smsDao.unpinThread(threadId)
+            smsThreadDao?.updateThreadPin(threadId, false, 0L, now)
         }
+    }
+
+    private suspend fun syncThreadSummary(threadId: Long) {
+        val threadDao = smsThreadDao ?: return
+        val msgs = smsDao.getThreadMessagesOnce(threadId)
+        if (msgs.isEmpty()) {
+            threadDao.deleteThread(threadId)
+            return
+        }
+        val latest = msgs.maxWithOrNull(compareBy<SmsMessage> { it.timestamp }.thenBy { it.id }) ?: return
+        val existing = threadDao.getThreadById(threadId)
+        val isPinned = (existing?.isPinned == true) || smsDao.isThreadPinned(threadId) > 0
+        val pinnedAt = existing?.pinnedAt ?: 0L
+        val unread = msgs.count { !it.isRead && !it.isOutgoing }
+        val contactName = msgs.lastOrNull { !it.contactName.isNullOrBlank() }?.contactName ?: latest.contactName
+
+        threadDao.upsertThread(
+            SmsThreadEntity(
+                threadId = threadId,
+                address = latest.address,
+                normalizedAddress = latest.normalizedAddress,
+                contactName = contactName,
+                snippet = latest.body,
+                lastMessageTimestamp = latest.timestamp,
+                isLastOutgoing = latest.isOutgoing,
+                lastDeliveryStatus = latest.deliveryStatus,
+                unreadCount = unread,
+                messageCount = msgs.size,
+                isPinned = isPinned,
+                pinnedAt = pinnedAt,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
     }
 }

@@ -19,6 +19,8 @@ import com.example.data.local.SearchDirectionFilter
 import com.example.data.local.SearchHistoryEntity
 import com.example.data.local.SearchSortOrder
 import com.example.data.local.SearchSourceFilter
+import com.example.data.archive.ConversationExportFormat
+import com.example.data.archive.ConversationExportFormatter
 import com.example.data.search.SearchResultItem
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -29,6 +31,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -73,7 +76,7 @@ data class AiChatArchiveEntry(
 class SearchAndAiViewModel(application: Application) : AndroidViewModel(application) {
     private val container = (application as AiSmsApplication).container
     private val searchRepo = container.searchRepository
-    private val aiTopicDao = container.database.aiTopicDao()
+    private val chatArchiveRepo = container.chatArchiveRepository
     private val xmlBuilder = container.xmlArchiveBuilder
     private val aiClient = container.aiSearchClient
     private val settingsRepo = container.settingsRepository
@@ -96,7 +99,7 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     // AI Topics & Chat State
-    val topics: StateFlow<List<AiTopicEntity>> = aiTopicDao.observeTopics()
+    val topics: StateFlow<List<AiTopicEntity>> = chatArchiveRepo.observeTopics()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _activeTopicId = MutableStateFlow<Long?>(null)
@@ -104,7 +107,7 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
 
     val activeTopic: StateFlow<AiTopicEntity?> = _activeTopicId
         .flatMapLatest { id ->
-            if (id == null) flowOf(null) else aiTopicDao.observeTopic(id)
+            if (id == null) flowOf(null) else chatArchiveRepo.observeTopic(id)
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
@@ -113,7 +116,7 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
             if (id == null) {
                 flowOf(emptyList())
             } else {
-                aiTopicDao.observeMessagesForTopic(id).map { list ->
+                chatArchiveRepo.observeMessagesForTopic(id).map { list ->
                     list.map { entity ->
                         val parsed = AiXmlResponseParser.decodeFromJson(entity.structuredJson)
                         val refs = entity.matchedRefsCsv
@@ -159,8 +162,8 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val aiChatArchive: StateFlow<List<AiChatArchiveEntry>> = combine(
-        aiTopicDao.observeTopics(),
-        aiTopicDao.observeAllChatMessages()
+        chatArchiveRepo.observeTopics(),
+        chatArchiveRepo.observeAllChatMessages()
     ) { allTopics, allMsgs ->
         val byTopic = allMsgs.groupBy { it.topicId }
         allTopics.map { topic ->
@@ -307,8 +310,8 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
 
     fun openArchivedAiChat(topicId: Long) {
         viewModelScope.launch {
-            val topic = aiTopicDao.getTopicById(topicId) ?: return@launch
-            val rawMsgs = aiTopicDao.getMessagesForTopicOnce(topicId)
+            val topic = chatArchiveRepo.getTopicById(topicId) ?: return@launch
+            val rawMsgs = chatArchiveRepo.getMessagesForTopicOnce(topicId)
             val displayMsgs = rawMsgs.map { entity ->
                 val parsed = AiXmlResponseParser.decodeFromJson(entity.structuredJson)
                 val refs = entity.matchedRefsCsv
@@ -329,12 +332,30 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
         _selectedArchivedAiChat.value = null
     }
 
+    suspend fun exportTopic(
+        topicId: Long,
+        format: ConversationExportFormat,
+        isPersian: Boolean
+    ): String? {
+        val twm = chatArchiveRepo.observeTopicWithMessages(topicId).first() ?: return null
+        return ConversationExportFormatter.formatAiChatTopic(twm, format, isPersian)
+    }
+
+    suspend fun exportSearchEntry(
+        entry: SearchHistoryEntity,
+        format: ConversationExportFormat,
+        isPersian: Boolean
+    ): String {
+        val items = searchRepo.loadArchivedSearchResults(entry)
+        return ConversationExportFormatter.formatSearchArchiveEntry(entry, items, format, isPersian)
+    }
+
     // AI Topic Mutators
     fun selectTopic(topicId: Long?) {
         _activeTopicId.value = topicId
         if (topicId != null) {
             viewModelScope.launch {
-                val topic = aiTopicDao.getTopicById(topicId)
+                val topic = chatArchiveRepo.getTopicById(topicId)
                 if (topic != null) {
                     val preset = runCatching { ArchiveRangePreset.valueOf(topic.rangePreset) }
                         .getOrDefault(ArchiveRangePreset.ONE_WEEK)
@@ -363,7 +384,7 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
 
     fun deleteTopic(topicId: Long) {
         viewModelScope.launch {
-            aiTopicDao.deleteTopic(topicId)
+            chatArchiveRepo.deleteTopic(topicId)
             if (_activeTopicId.value == topicId) {
                 _activeTopicId.value = null
             }
@@ -426,7 +447,8 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                 strings = strings,
                 contextLimitTokens = settings.aiContextLimitTokens,
                 priorHistoryTokens = 0,
-                preferFileUpload = settings.aiSupportsFileUpload
+                preferFileUpload = settings.aiSupportsFileUpload,
+                maxOutputTokens = settings.aiMaxOutputTokens
             )
         }
     }
@@ -461,7 +483,7 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                 val defaultTitle = question?.take(42)?.let {
                     if (question.length > 42) "$it…" else it
                 } ?: if (isPersian) "جستجوی جدید" else "New AI Topic"
-                topicId = aiTopicDao.insertTopic(
+                topicId = chatArchiveRepo.insertTopic(
                     AiTopicEntity(
                         title = defaultTitle,
                         createdAt = now,
@@ -479,9 +501,9 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                 )
                 _activeTopicId.value = topicId
             } else {
-                val existing = aiTopicDao.getTopicById(topicId)
+                val existing = chatArchiveRepo.getTopicById(topicId)
                 if (existing != null) {
-                    aiTopicDao.updateTopic(
+                    chatArchiveRepo.updateTopic(
                         existing.copy(
                             updatedAt = now,
                             rangePreset = draft.preset.name,
@@ -501,7 +523,7 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
             _isAiSending.value = true
             try {
                 val settings = settingsRepo.getCurrentSettings()
-                val priorHistory = aiTopicDao.getMessagesForTopicOnce(topicId)
+                val priorHistory = chatArchiveRepo.getMessagesForTopicOnce(topicId)
                 val priorTokens = priorHistory.takeLast(6).sumOf {
                     ContextBudgetCalculator.estimateTokens(it.text)
                 }
@@ -519,7 +541,8 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                     strings = strings,
                     contextLimitTokens = settings.aiContextLimitTokens,
                     priorHistoryTokens = priorTokens,
-                    preferFileUpload = settings.aiSupportsFileUpload
+                    preferFileUpload = settings.aiSupportsFileUpload,
+                    maxOutputTokens = settings.aiMaxOutputTokens
                 )
                 val kb = String.format(java.util.Locale.US, "%.1f KB", contextResult.totalBytes / 1024.0)
                 val countNum = DateUtils.formatNumber(contextResult.totalCount, isPersian)
@@ -544,7 +567,7 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                     AiContextMode.INLINE_XML -> "${contextResult.rangeLabel} • $countNum • $kb XML"
                 }
 
-                aiTopicDao.insertChatMessage(
+                chatArchiveRepo.insertChatMessage(
                     AiChatMessageEntity(
                         topicId = topicId,
                         role = "USER",
@@ -566,7 +589,7 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                 )
 
                 aiResult.onSuccess { parsed ->
-                    aiTopicDao.insertChatMessage(
+                    chatArchiveRepo.insertChatMessage(
                         AiChatMessageEntity(
                             topicId = topicId,
                             role = "ASSISTANT",
@@ -579,7 +602,7 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                     )
                 }.onFailure { err ->
                     val errMsg = err.localizedMessage ?: err.message ?: "AI request failed"
-                    aiTopicDao.insertChatMessage(
+                    chatArchiveRepo.insertChatMessage(
                         AiChatMessageEntity(
                             topicId = topicId,
                             role = "ASSISTANT",
@@ -590,8 +613,8 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                     )
                 }
 
-                aiTopicDao.getTopicById(topicId)?.let { t ->
-                    aiTopicDao.updateTopic(t.copy(updatedAt = System.currentTimeMillis()))
+                chatArchiveRepo.getTopicById(topicId)?.let { t ->
+                    chatArchiveRepo.updateTopic(t.copy(updatedAt = System.currentTimeMillis()))
                 }
             } finally {
                 _isAiSending.value = false

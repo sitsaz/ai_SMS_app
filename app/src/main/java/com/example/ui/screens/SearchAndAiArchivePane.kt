@@ -30,12 +30,15 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
@@ -63,10 +66,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.core.localization.AppStrings
+import com.example.core.localization.DateFormatter
 import com.example.core.localization.DateUtils
 import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
+import com.example.data.archive.ConversationExportFormat
 import com.example.data.local.AiTopicEntity
 import com.example.data.local.SearchDirectionFilter
 import com.example.data.local.SearchHistoryEntity
@@ -113,6 +118,8 @@ fun SearchAndAiArchivePane(
     onDismissArchivedAiChat: () -> Unit,
     onContinueAiChat: (AiTopicEntity) -> Unit,
     onDeleteAiChatTopic: (Long) -> Unit,
+    onExportAiChat: (Long, ConversationExportFormat) -> Unit = { _, _ -> },
+    onExportSearchEntry: (SearchHistoryEntity, ConversationExportFormat) -> Unit = { _, _ -> },
     onShowExistingXml: (String, String, Int) -> Unit,
     onResultClick: (SearchResultItem) -> Unit
 ) {
@@ -299,6 +306,7 @@ fun SearchAndAiArchivePane(
             strings = strings,
             onDismiss = onDismissArchivedSearch,
             onRerun = { onRerunSearch(entry) },
+            onExport = { fmt -> onExportSearchEntry(entry, fmt) },
             onResultClick = { clicked ->
                 onDismissArchivedSearch()
                 onResultClick(clicked)
@@ -318,6 +326,7 @@ fun SearchAndAiArchivePane(
                 onDismissArchivedAiChat()
                 onContinueAiChat(topic)
             },
+            onExport = { fmt -> onExportAiChat(topic.id, fmt) },
             onShowExistingXml = onShowExistingXml,
             onMatchedItemClick = { clicked ->
                 onDismissArchivedAiChat()
@@ -444,7 +453,7 @@ private fun ArchivedSearchCard(
                     fontWeight = FontWeight.Medium
                 )
                 Text(
-                    text = DateUtils.formatDateTime(entry.timestamp, calendarMode, usePersianDigits = isPersian),
+                    text = DateFormatter.formatChatTimestamp(entry.timestamp, calendarMode, usePersianDigits = isPersian),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -581,7 +590,7 @@ private fun ArchivedAiChatCard(
                     }
                 }
                 Text(
-                    text = DateUtils.formatDateTime(entry.topic.updatedAt, calendarMode, usePersianDigits = isPersian),
+                    text = DateFormatter.formatChatTimestamp(entry.topic.updatedAt, calendarMode, usePersianDigits = isPersian),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -600,8 +609,11 @@ private fun ArchivedSearchResultsSheet(
     strings: AppStrings,
     onDismiss: () -> Unit,
     onRerun: () -> Unit,
+    onExport: (ConversationExportFormat) -> Unit,
     onResultClick: (SearchResultItem) -> Unit
 ) {
+    var showExportMenu by remember { mutableStateOf(false) }
+
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
@@ -623,12 +635,39 @@ private fun ArchivedSearchResultsSheet(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "${strings.archivedSnapshotNote} • ${DateUtils.formatDateTime(entry.timestamp, calendarMode, usePersianDigits = isPersian)}",
+                        text = "${strings.archivedSnapshotNote} • ${DateFormatter.formatDualTimestamp(entry.timestamp, calendarMode, usePersianDigits = isPersian)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(4.dp))
+                Box {
+                    IconButton(
+                        onClick = { showExportMenu = true },
+                        modifier = Modifier.testTag("sheet_export_search_button")
+                    ) {
+                        Icon(Icons.Default.FileDownload, contentDescription = strings.exportConversation)
+                    }
+                    DropdownMenu(
+                        expanded = showExportMenu,
+                        onDismissRequest = { showExportMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text(strings.exportAsText) },
+                            onClick = {
+                                showExportMenu = false
+                                onExport(ConversationExportFormat.TEXT)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(strings.exportAsJson) },
+                            onClick = {
+                                showExportMenu = false
+                                onExport(ConversationExportFormat.JSON)
+                            }
+                        )
+                    }
+                }
                 FilledTonalButton(
                     onClick = onRerun,
                     modifier = Modifier.testTag("sheet_rerun_search_button")
@@ -689,11 +728,13 @@ private fun ArchivedAiChatSheet(
     strings: AppStrings,
     onDismiss: () -> Unit,
     onContinueChat: () -> Unit,
+    onExport: (ConversationExportFormat) -> Unit,
     onShowExistingXml: (String, String, Int) -> Unit,
     onMatchedItemClick: (SearchResultItem) -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
     var copiedMsgId by remember { mutableStateOf<Long?>(null) }
+    var showExportMenu by remember { mutableStateOf(false) }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -716,12 +757,39 @@ private fun ArchivedAiChatSheet(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = DateUtils.formatDateTime(topic.updatedAt, calendarMode, usePersianDigits = isPersian),
+                        text = DateFormatter.formatDualTimestamp(topic.updatedAt, calendarMode, usePersianDigits = isPersian),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(4.dp))
+                Box {
+                    IconButton(
+                        onClick = { showExportMenu = true },
+                        modifier = Modifier.testTag("sheet_export_ai_chat_button")
+                    ) {
+                        Icon(Icons.Default.FileDownload, contentDescription = strings.exportConversation)
+                    }
+                    DropdownMenu(
+                        expanded = showExportMenu,
+                        onDismissRequest = { showExportMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text(strings.exportAsText) },
+                            onClick = {
+                                showExportMenu = false
+                                onExport(ConversationExportFormat.TEXT)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(strings.exportAsJson) },
+                            onClick = {
+                                showExportMenu = false
+                                onExport(ConversationExportFormat.JSON)
+                            }
+                        )
+                    }
+                }
                 FilledTonalButton(
                     onClick = onContinueChat,
                     modifier = Modifier.testTag("sheet_continue_ai_chat_button")
@@ -844,7 +912,7 @@ private fun ArchivedAiChatSheet(
                                         )
                                     } else {
                                         Text(
-                                            text = DateUtils.formatDateTime(msg.timestamp, calendarMode, usePersianDigits = isPersian),
+                                            text = DateFormatter.formatChatTimestamp(msg.timestamp, calendarMode, usePersianDigits = isPersian),
                                             style = MaterialTheme.typography.labelSmall,
                                             color = textColor.copy(alpha = 0.65f)
                                         )

@@ -1,10 +1,12 @@
 package com.example.data.local
 
+import androidx.room.Embedded
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Fts4
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import androidx.room.Relation
 
 enum class DeliveryStatus {
     NONE,
@@ -108,6 +110,39 @@ data class SmsMessage(
 data class PinnedThreadEntity(
     @PrimaryKey val threadId: Long,
     val pinnedAt: Long
+)
+
+@Entity(
+    tableName = "sms_threads",
+    indices = [
+        Index(value = ["normalizedAddress"]),
+        Index(value = ["lastMessageTimestamp"]),
+        Index(value = ["isPinned"])
+    ]
+)
+data class SmsThreadEntity(
+    @PrimaryKey val threadId: Long,
+    val address: String,
+    val normalizedAddress: String,
+    val contactName: String? = null,
+    val snippet: String = "",
+    val lastMessageTimestamp: Long = 0L,
+    val isLastOutgoing: Boolean = false,
+    val lastDeliveryStatus: String = DeliveryStatus.NONE.name,
+    val unreadCount: Int = 0,
+    val messageCount: Int = 0,
+    val isPinned: Boolean = false,
+    val pinnedAt: Long = 0L,
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+data class SmsThreadWithMessages(
+    @Embedded val thread: SmsThreadEntity,
+    @Relation(
+        parentColumn = "threadId",
+        entityColumn = "threadId"
+    )
+    val messages: List<SmsMessage>
 )
 
 @Fts4(contentEntity = SmsMessage::class)
@@ -235,4 +270,13 @@ data class SearchHistoryEntity(
     val matchedRefsCsv: String = "",
     val resultsSnapshotJson: String = "",
     val timestamp: Long
+)
+
+data class AiTopicWithMessages(
+    @Embedded val topic: AiTopicEntity,
+    @Relation(
+        parentColumn = "id",
+        entityColumn = "topicId"
+    )
+    val messages: List<AiChatMessageEntity>
 )

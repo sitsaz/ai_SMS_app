@@ -21,5 +21,7 @@ class NotificationRepository(private val notificationDao: NotificationDao) {
 
     suspend fun deleteById(id: Long) = notificationDao.deleteById(id)
 
+    suspend fun markAllRead() = notificationDao.markAllNotificationsRead()
+
     suspend fun clearAll() = notificationDao.clearAll()
 }

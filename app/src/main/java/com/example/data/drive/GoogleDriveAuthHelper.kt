@@ -17,6 +17,10 @@ import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.InetAddress
+import java.net.ServerSocket
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
@@ -122,7 +126,11 @@ object GoogleDriveAuthHelper {
             }.getOrNull()
         }
 
-    fun startBrowserPkceSession(context: Context, customClientId: String): PkceSession? {
+    fun startBrowserPkceSession(
+        context: Context,
+        customClientId: String,
+        overrideRedirectUri: String? = null
+    ): PkceSession? {
         val cleanClientId = customClientId.trim()
         if (cleanClientId.isBlank()) return null
 
@@ -138,8 +146,8 @@ object GoogleDriveAuthHelper {
         val challengeBytes = MessageDigest.getInstance("SHA-256").digest(codeVerifier.toByteArray(Charsets.US_ASCII))
         val codeChallenge = Base64.encodeToString(challengeBytes, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
 
-        // Installed / Android app custom-scheme redirect URI matching package name
-        val redirectUri = "${context.packageName}:/oauth2redirect"
+        val redirectUri = overrideRedirectUri?.takeIf { it.isNotBlank() }
+            ?: "${context.packageName}:/oauth2redirect"
         val authUrl = Uri.Builder()
             .scheme("https")
             .authority("accounts.google.com")
@@ -164,6 +172,58 @@ object GoogleDriveAuthHelper {
             authUrl = authUrl
         )
     }
+
+    /**
+     * Starts a short-lived local HTTP listener on http://127.0.0.1:<port> so a Desktop/Installed
+     * OAuth Client ID can complete Google OAuth PKCE in the system browser without APK SHA-1
+     * registration or manual URL copy-pasting.
+     */
+    suspend fun awaitLoopbackPkceCallback(
+        serverSocket: ServerSocket,
+        expectedState: String,
+        timeoutMs: Int = 180_000
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            serverSocket.soTimeout = timeoutMs
+            serverSocket.use { server ->
+                val client = server.accept()
+                client.use { socket ->
+                    val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                    val requestLine = reader.readLine().orEmpty()
+                    val pathWithQuery = requestLine.split(" ").getOrNull(1).orEmpty()
+                    val parsed = Uri.parse("http://127.0.0.1$pathWithQuery")
+                    val err = parsed.getQueryParameter("error")
+                    val code = parsed.getQueryParameter("code")
+                    val state = parsed.getQueryParameter("state")
+
+                    val html = if (!err.isNullOrBlank() || code.isNullOrBlank()) {
+                        "<html><body style='font-family:sans-serif;text-align:center;padding:32px'><h2>Sign-in did not complete</h2><p>You can close this tab and return to AI SMS Manager.</p></body></html>"
+                    } else {
+                        "<html><body style='font-family:sans-serif;text-align:center;padding:32px'><h2>Google Drive Connected</h2><p>You can close this browser tab and return to AI SMS Manager.</p></body></html>"
+                    }
+                    val respBytes = html.toByteArray(Charsets.UTF_8)
+                    val out = socket.getOutputStream()
+                    out.write(
+                        ("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${respBytes.size}\r\nConnection: close\r\n\r\n")
+                            .toByteArray(Charsets.US_ASCII)
+                    )
+                    out.write(respBytes)
+                    out.flush()
+
+                    if (!err.isNullOrBlank()) {
+                        throw IllegalStateException("Google OAuth error: $err")
+                    }
+                    if (!state.isNullOrBlank() && state != expectedState) {
+                        throw IllegalStateException("OAuth state mismatch")
+                    }
+                    require(!code.isNullOrBlank()) { "Authorization code missing from callback" }
+                    code
+                }
+            }
+        }
+    }
+
+    fun openLoopbackSocket(): ServerSocket = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
 
     suspend fun exchangePkceCodeForTokens(
         session: PkceSession,
@@ -236,7 +296,12 @@ object GoogleDriveAuthHelper {
         val pkg = getAppPackageName(context)
         val sha1 = getAppSigningSha1(context)
 
-        val isConfig = statusCode == 10 ||
+        val isUnregistered = rawMsg.contains("UNREGISTERED_ON_API_CONSOLE", ignoreCase = true) ||
+            rawMsg.contains("UnregisteredOnApiConsole", ignoreCase = true) ||
+            (statusCode == 8 && rawMsg.contains("unregistered", ignoreCase = true))
+
+        val isConfig = isUnregistered ||
+            statusCode == 10 ||
             statusCode == 12500 ||
             rawMsg.contains("DEVELOPER_ERROR", ignoreCase = true) ||
             rawMsg.contains("10:", ignoreCase = true) ||
@@ -251,9 +316,9 @@ object GoogleDriveAuthHelper {
             }
             isConfig -> {
                 if (isPersian) {
-                    "خطای احراز هویت Google ($statusCode): برای امضای این APK یک Android OAuth Client در Google Cloud ثبت نشده است.\nPackage: $pkg\nSHA-1: $sha1\nمی‌توانید از روش انتخاب حساب / مرورگر یا توکن OAuth در پایین استفاده کنید."
+                    "این بسته و امضای SHA-1 هنوز به عنوان Android OAuth Client در Google Cloud ثبت نشده است (UNREGISTERED_ON_API_CONSOLE).\nPackage: $pkg\nSHA-1: $sha1\nراه‌حل سریع: از «ورود با مرورگر (Loopback PKCE)» با یک Desktop Client ID (بدون نیاز به SHA-1) یا ثبت SHA-1 در کنسول یا خروجی/ورودی JSON محلی استفاده کنید."
                 } else {
-                    "Google OAuth config error ($statusCode): Android OAuth client for this APK signing key is not registered in Google Cloud.\nPackage: $pkg\nSHA-1: $sha1\nUse Account Fallback / Browser OAuth below."
+                    "This APK package & SHA-1 is not registered as an Android OAuth Client in Google Cloud Console (UNREGISTERED_ON_API_CONSOLE).\nPackage: $pkg\nSHA-1: $sha1\nUse Loopback Browser PKCE (with a Desktop Client ID, no SHA-1 needed), register SHA-1 in Cloud Console, or use Local JSON Backup below."
                 }
             }
             else -> {

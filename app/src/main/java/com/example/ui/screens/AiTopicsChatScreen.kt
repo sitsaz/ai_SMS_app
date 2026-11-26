@@ -69,6 +69,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.core.localization.AppStrings
+import com.example.core.localization.DateFormatter
 import com.example.core.localization.DateUtils
 import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
@@ -204,7 +205,7 @@ fun AiTopicsChatPane(
             )
             Text(
                 text = if (activeTopic != null) {
-                    DateUtils.formatListTimestamp(activeTopic.updatedAt, calendarMode, isPersianLabels = isPersian)
+                    DateFormatter.formatSmsTimestamp(activeTopic.updatedAt, calendarMode, usePersianDigits = isPersian)
                 } else {
                     strings.newTopic
                 },
@@ -409,7 +410,15 @@ fun AiTopicsChatPane(
                                                 modifier = Modifier.weight(1f, fill = false)
                                             )
                                         } else {
-                                            Spacer(Modifier.width(1.dp))
+                                            Text(
+                                                text = DateFormatter.formatChatTimestamp(
+                                                    timestampMs = msg.timestamp,
+                                                    mode = calendarMode,
+                                                    usePersianDigits = isPersian
+                                                ),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = bubbleTextColor.copy(alpha = 0.65f)
+                                            )
                                         }
                                         IconButton(
                                             onClick = {

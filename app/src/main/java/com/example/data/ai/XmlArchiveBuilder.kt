@@ -67,10 +67,15 @@ object ContextBudgetCalculator {
         contextLimitTokens: Int,
         userQuestion: String,
         priorHistoryTokens: Int,
-        overheadReserveTokens: Int = 1_200
+        overheadReserveTokens: Int = 1_200,
+        maxOutputTokens: Int = 0
     ): Int {
         val safeLimit = contextLimitTokens.coerceIn(1_024, 2_000_000)
-        val completionReserve = (safeLimit * 0.15).toInt().coerceIn(512, 4_096)
+        val completionReserve = if (maxOutputTokens > 0) {
+            maxOutputTokens.coerceAtMost((safeLimit * 0.25).toInt().coerceAtLeast(512))
+        } else {
+            (safeLimit * 0.15).toInt().coerceIn(512, 4_096)
+        }
         val usedByPrompt = overheadReserveTokens + estimateTokens(userQuestion) + priorHistoryTokens + completionReserve
         return (safeLimit - usedByPrompt).coerceAtLeast(450)
     }
@@ -169,7 +174,8 @@ class XmlArchiveBuilder(
         strings: AppStrings,
         contextLimitTokens: Int = 32_000,
         priorHistoryTokens: Int = 0,
-        preferFileUpload: Boolean = false
+        preferFileUpload: Boolean = false,
+        maxOutputTokens: Int = 0
     ): XmlArchiveBuildResult {
         return when (contextMode) {
             AiContextMode.SMART_AUTO -> buildSmartContextBudgeted(
@@ -183,7 +189,8 @@ class XmlArchiveBuilder(
                 strings = strings,
                 contextLimitTokens = contextLimitTokens,
                 priorHistoryTokens = priorHistoryTokens,
-                preferFileUpload = preferFileUpload
+                preferFileUpload = preferFileUpload,
+                maxOutputTokens = maxOutputTokens
             )
             AiContextMode.INLINE_XML -> buildXml(
                 preset = preset,
@@ -225,7 +232,8 @@ class XmlArchiveBuilder(
         strings: AppStrings,
         contextLimitTokens: Int,
         priorHistoryTokens: Int,
-        preferFileUpload: Boolean
+        preferFileUpload: Boolean,
+        maxOutputTokens: Int = 0
     ): XmlArchiveBuildResult = withContext(Dispatchers.IO) {
         val (startMs, endMs) = resolveBounds(preset, customStartMs, customEndMs)
         val maxPool = 2000
@@ -262,7 +270,8 @@ class XmlArchiveBuilder(
         val availableTokens = ContextBudgetCalculator.availableMessageBudgetTokens(
             contextLimitTokens = contextLimitTokens,
             userQuestion = question,
-            priorHistoryTokens = priorHistoryTokens
+            priorHistoryTokens = priorHistoryTokens,
+            maxOutputTokens = maxOutputTokens
         )
 
         val (budgetedNewestFirst, usedTokens) = ContextBudgetCalculator.selectNewestWithinBudget(
@@ -597,7 +606,8 @@ class XmlArchiveBuilder(
         smartContextBudget: Boolean = true,
         contextLimitTokens: Int = 32_000,
         priorHistoryTokens: Int = 0,
-        preferFileUpload: Boolean = false
+        preferFileUpload: Boolean = false,
+        maxOutputTokens: Int = 0
     ): StructuredXmlPromptResult = withContext(Dispatchers.IO) {
         val poolCap = if (smartContextBudget) 1500 else maxItems.coerceIn(10, 500)
         val (startMs, endMs) = resolveBounds(preset, customStartMs, customEndMs)
@@ -661,7 +671,8 @@ class XmlArchiveBuilder(
             val availableTokens = ContextBudgetCalculator.availableMessageBudgetTokens(
                 contextLimitTokens = contextLimitTokens,
                 userQuestion = userQuestion,
-                priorHistoryTokens = priorHistoryTokens
+                priorHistoryTokens = priorHistoryTokens,
+                maxOutputTokens = maxOutputTokens
             )
             val merged = buildList {
                 smsNewestFirst.forEach { sms ->

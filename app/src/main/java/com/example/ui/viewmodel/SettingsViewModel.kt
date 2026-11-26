@@ -35,6 +35,10 @@ sealed interface ConnectionTestState {
         val preview: String,
         val supportsFileUpload: Boolean = false,
         val supportsImageInput: Boolean = false,
+        val supportsSystemPrompt: Boolean = true,
+        val supportsTemperature: Boolean = true,
+        val supportsJsonMode: Boolean = false,
+        val maxOutputTokens: Int? = null,
         val detectedContextLength: Int? = null,
         val capabilitySummary: String = ""
     ) : ConnectionTestState
@@ -244,12 +248,21 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     settingsRepo.saveAiCapabilities(
                         supportsFileUpload = report.supportsFileUpload,
                         supportsImageInput = report.supportsImageInput,
+                        supportsSystemPrompt = report.supportsSystemPrompt,
+                        supportsTemperature = report.supportsTemperature,
+                        supportsJsonMode = report.supportsJsonMode,
+                        maxOutputTokens = report.maxOutputTokens,
+                        detectedContextLimit = report.detectedContextLength,
                         detail = report.capabilitySummary
                     )
                     ConnectionTestState.Success(
                         preview = report.replyPreview,
                         supportsFileUpload = report.supportsFileUpload,
                         supportsImageInput = report.supportsImageInput,
+                        supportsSystemPrompt = report.supportsSystemPrompt,
+                        supportsTemperature = report.supportsTemperature,
+                        supportsJsonMode = report.supportsJsonMode,
+                        maxOutputTokens = report.maxOutputTokens,
                         detectedContextLength = report.detectedContextLength,
                         capabilitySummary = report.capabilitySummary
                     )
@@ -286,6 +299,60 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             settingsRepo.setDriveCustomClientId(customClientId)
         }
         return GoogleDriveAuthHelper.startBrowserPkceSession(getApplication(), customClientId)
+    }
+
+    fun startLoopbackBrowserPkce(
+        customClientId: String,
+        isPersian: Boolean,
+        onLaunchAuthUrl: (String) -> Unit
+    ) {
+        val cleanId = customClientId.trim()
+        if (cleanId.isBlank()) {
+            onDriveAuthFailed(if (isPersian) "ابتدا Client ID را وارد کنید." else "Enter a Desktop/OAuth Client ID first.")
+            return
+        }
+        viewModelScope.launch {
+            settingsRepo.setDriveCustomClientId(cleanId)
+            val socketRes = runCatching { GoogleDriveAuthHelper.openLoopbackSocket() }
+            socketRes.onFailure { err ->
+                onDriveAuthFailed(err.localizedMessage ?: "Cannot open local OAuth listener")
+            }.onSuccess { serverSocket ->
+                val redirectUri = "http://127.0.0.1:${serverSocket.localPort}"
+                val session = GoogleDriveAuthHelper.startBrowserPkceSession(
+                    context = getApplication(),
+                    customClientId = cleanId,
+                    overrideRedirectUri = redirectUri
+                )
+                if (session == null) {
+                    runCatching { serverSocket.close() }
+                    onDriveAuthFailed("Invalid Client ID")
+                    return@launch
+                }
+                _driveState.update {
+                    it.copy(
+                        isBusy = true,
+                        statusMessage = if (isPersian) {
+                            "مرورگر باز شد؛ پس از تایید، اتصال به صورت خودکار تکمیل می‌شود..."
+                        } else {
+                            "Browser opened; waiting for Google OAuth redirect..."
+                        },
+                        isError = false
+                    )
+                }
+                onLaunchAuthUrl(session.authUrl)
+                val codeRes = GoogleDriveAuthHelper.awaitLoopbackPkceCallback(serverSocket, session.state)
+                codeRes.onSuccess { code ->
+                    val tokenRes = GoogleDriveAuthHelper.exchangePkceCodeForTokens(session, code)
+                    tokenRes.onSuccess { (access, refresh) ->
+                        onDriveAuthorized(accessToken = access, isPersian = isPersian, refreshToken = refresh)
+                    }.onFailure { err ->
+                        onDriveAuthFailed(err.localizedMessage ?: "Loopback token exchange failed")
+                    }
+                }.onFailure { err ->
+                    onDriveAuthFailed(err.localizedMessage ?: "Loopback OAuth cancelled or timed out")
+                }
+            }
+        }
     }
 
     fun completeBrowserPkce(session: PkceSession, rawUrlOrCode: String, isPersian: Boolean) {

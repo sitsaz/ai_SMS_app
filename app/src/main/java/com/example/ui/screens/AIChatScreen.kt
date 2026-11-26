@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -33,6 +34,7 @@ import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Notifications
@@ -44,6 +46,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
@@ -70,11 +74,13 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.core.localization.DateFormatter
 import com.example.core.localization.DateUtils
 import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
 import com.example.data.ai.XmlArchiveBuildResult
+import com.example.data.archive.ConversationExportFormat
 import com.example.data.local.AiChatContextSource
 import com.example.data.local.ArchiveRangePreset
 import com.example.data.local.ConversationRow
@@ -117,6 +123,8 @@ fun AIChatScreen(
     onDismissXmlPreview: () -> Unit,
     onSendMessage: (String) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenArchive: () -> Unit = {},
+    onExportChat: (Long, ConversationExportFormat) -> Unit = { _, _ -> },
     onMatchedItemClick: (SearchResultItem) -> Unit
 ) {
     val strings = LocalStrings.current
@@ -128,6 +136,7 @@ fun AIChatScreen(
     var showThreadPicker by remember { mutableStateOf(false) }
     var showArchiveSheet by remember { mutableStateOf(false) }
     var showCustomDateDialog by remember { mutableStateOf(false) }
+    var showExportMenu by remember { mutableStateOf(false) }
     var copiedMsgId by remember { mutableStateOf<Long?>(null) }
     val listState = rememberLazyListState()
 
@@ -143,6 +152,7 @@ fun AIChatScreen(
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
                 title = {
@@ -160,11 +170,40 @@ fun AIChatScreen(
                     }
                 },
                 actions = {
+                    if (activeTopicId != null && messages.isNotEmpty()) {
+                        Box {
+                            IconButton(
+                                onClick = { showExportMenu = true },
+                                modifier = Modifier.testTag("aichat_export_button")
+                            ) {
+                                Icon(Icons.Default.FileDownload, contentDescription = strings.exportConversation)
+                            }
+                            DropdownMenu(
+                                expanded = showExportMenu,
+                                onDismissRequest = { showExportMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(strings.exportAsText) },
+                                    onClick = {
+                                        showExportMenu = false
+                                        onExportChat(activeTopicId, ConversationExportFormat.TEXT)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(strings.exportAsJson) },
+                                    onClick = {
+                                        showExportMenu = false
+                                        onExportChat(activeTopicId, ConversationExportFormat.JSON)
+                                    }
+                                )
+                            }
+                        }
+                    }
                     IconButton(
-                        onClick = { showArchiveSheet = true },
+                        onClick = onOpenArchive,
                         modifier = Modifier.testTag("aichat_history_button")
                     ) {
-                        Icon(Icons.Default.History, contentDescription = strings.savedAiChatsLabel)
+                        Icon(Icons.Default.History, contentDescription = strings.openArchiveButton)
                     }
                     IconButton(
                         onClick = { onPreviewCurrentXml(draftInput) },
@@ -470,10 +509,10 @@ fun AIChatScreen(
                                             }
                                             Spacer(Modifier.width(8.dp))
                                             Text(
-                                                text = DateUtils.formatListTimestamp(
-                                                    session.topic.updatedAt,
-                                                    calendarMode,
-                                                    isPersianLabels = isPersian
+                                                text = DateFormatter.formatSmsTimestamp(
+                                                    timestampMs = session.topic.updatedAt,
+                                                    mode = calendarMode,
+                                                    usePersianDigits = isPersian
                                                 ),
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -586,7 +625,15 @@ fun AIChatScreen(
                                                     modifier = Modifier.weight(1f, fill = false)
                                                 )
                                             } else {
-                                                Spacer(Modifier.width(1.dp))
+                                                Text(
+                                                    text = DateFormatter.formatChatTimestamp(
+                                                        timestampMs = msg.timestamp,
+                                                        mode = calendarMode,
+                                                        usePersianDigits = isPersian
+                                                    ),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = bubbleTextColor.copy(alpha = 0.65f)
+                                                )
                                             }
                                             IconButton(
                                                 onClick = {
@@ -915,7 +962,7 @@ fun AIChatScreen(
                                                 if (session.matchedRefsCount > 0) {
                                                     append(" • ${DateUtils.formatNumber(session.matchedRefsCount, isPersian)} ${strings.matchedItemsBadge}")
                                                 }
-                                                append(" • ${DateUtils.formatDateTime(session.topic.updatedAt, calendarMode, usePersianDigits = isPersian)}")
+                                                append(" • ${DateFormatter.formatChatTimestamp(session.topic.updatedAt, calendarMode, usePersianDigits = isPersian)}")
                                             },
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant

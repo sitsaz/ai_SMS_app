@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -27,7 +28,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MarkChatUnread
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
@@ -47,6 +50,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -59,6 +64,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,10 +77,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.core.localization.DateFormatter
 import com.example.core.localization.DateUtils
 import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
+import kotlinx.coroutines.launch
 import com.example.data.local.ConversationRow
 import com.example.data.local.DeliveryStatus
 import com.example.data.search.SearchResultItem
@@ -106,16 +114,21 @@ fun MessagesScreen(
     onOpenThread: (threadId: Long, address: String, targetMessageId: Long) -> Unit,
     onStartChatWithAddress: (address: String) -> Unit,
     onTogglePinThread: (threadId: Long, pinned: Boolean) -> Unit,
-    onDeleteThread: (threadId: Long) -> Unit
+    onDeleteThread: (threadId: Long) -> Unit,
+    onMarkAllRead: () -> Unit = {},
+    onOpenArchive: () -> Unit = {}
 ) {
     val strings = LocalStrings.current
     val isPersian = LocalIsPersian.current
     val calendarMode = LocalCalendarMode.current
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
     var showContactsSheet by remember { mutableStateOf(false) }
     var threadActionTarget by remember { mutableStateOf<ConversationRow?>(null) }
     var threadPendingDelete by remember { mutableStateOf<ConversationRow?>(null) }
     val searchFocusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
+    val hasUnread = remember(conversations) { conversations.any { it.unreadCount > 0 } }
 
     BackHandler(enabled = isSearchExpanded) {
         onSearchExpandedChange(false)
@@ -128,6 +141,8 @@ fun MessagesScreen(
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         topBar = {
             AnimatedContent(
                 targetState = isSearchExpanded,
@@ -212,6 +227,29 @@ fun MessagesScreen(
                                 Icon(
                                     imageVector = Icons.Default.Search,
                                     contentDescription = strings.tabSearch
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    onMarkAllRead()
+                                    scope.launch { snackbarHostState.showSnackbar(strings.allMarkedAsRead) }
+                                },
+                                enabled = hasUnread || conversations.isNotEmpty(),
+                                modifier = Modifier.testTag("mark_all_read_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DoneAll,
+                                    contentDescription = strings.markAllAsRead,
+                                    tint = if (hasUnread) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            IconButton(
+                                onClick = onOpenArchive,
+                                modifier = Modifier.testTag("messages_open_archive_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.History,
+                                    contentDescription = strings.openArchiveButton
                                 )
                             }
                             IconButton(
@@ -444,10 +482,10 @@ fun MessagesScreen(
                                         }
                                         Spacer(Modifier.width(8.dp))
                                         Text(
-                                            text = DateUtils.formatListTimestamp(
+                                            text = DateFormatter.formatSmsTimestamp(
                                                 timestampMs = conv.timestamp,
                                                 mode = calendarMode,
-                                                isPersianLabels = isPersian
+                                                usePersianDigits = isPersian
                                             ),
                                             style = MaterialTheme.typography.labelSmall,
                                             color = if (conv.unreadCount > 0) {

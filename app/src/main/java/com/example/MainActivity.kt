@@ -16,10 +16,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import com.example.data.drive.GoogleDriveAuthHelper
 import com.example.data.drive.PkceSession
 import com.google.android.gms.auth.api.identity.Identity
+import android.widget.Toast
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -68,22 +70,26 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.example.core.compat.AndroidCompat
+import com.example.core.localization.DateFormatter
 import com.example.core.localization.DateUtils
 import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
 import com.example.core.localization.resolveIsPersian
+import com.example.data.archive.ConversationExportFormat
 import com.example.data.search.ArchiveItemSource
 import com.example.data.search.SearchResultItem
 import com.example.ui.components.SmsPermissionRationaleDialog
 import com.example.ui.components.SmsPermissionSettingsDialog
 import com.example.ui.navigation.AIChatRoute
+import com.example.ui.navigation.ArchiveRoute
 import com.example.ui.navigation.MessagesRoute
 import com.example.ui.navigation.NotificationsRoute
 import com.example.ui.navigation.SearchRoute
 import com.example.ui.navigation.SettingsRoute
 import com.example.ui.navigation.ThreadRoute
 import com.example.ui.screens.AIChatScreen
+import com.example.ui.screens.ArchiveScreen
 import com.example.ui.screens.MessagesScreen
 import com.example.ui.screens.NotificationsScreen
 import com.example.ui.screens.SearchAndAiScreen
@@ -194,6 +200,7 @@ private fun AiSmsManagerRoot(
     var hasPromptedSmsPermissionsOnce by remember { mutableStateOf(false) }
     var pendingPkceSession by remember { mutableStateOf<PkceSession?>(null) }
     var pendingFallbackAccountEmail by remember { mutableStateOf<String?>(null) }
+    var pendingExportText by remember { mutableStateOf<String?>(null) }
     val activity = remember(context) { AndroidCompat.findActivity(context) }
 
     val permissionsLauncher = rememberLauncherForActivityResult(
@@ -301,12 +308,6 @@ private fun AiSmsManagerRoot(
             }
         } catch (e: Exception) {
             settingsVm.onDriveAuthException(e, isPersian)
-            val (_, isConfigErr) = GoogleDriveAuthHelper.describeDriveAuthException(context, e, isPersian)
-            if (isConfigErr) {
-                driveAccountPickerLauncher.launch(
-                    GoogleDriveAuthHelper.createGoogleAccountPickerIntent(driveState.accountEmail)
-                )
-            }
         }
     }
 
@@ -336,12 +337,6 @@ private fun AiSmsManagerRoot(
                 }
                 .addOnFailureListener { e ->
                     settingsVm.onDriveAuthException(e, isPersian)
-                    val (_, isConfigErr) = GoogleDriveAuthHelper.describeDriveAuthException(context, e, isPersian)
-                    if (isConfigErr) {
-                        driveAccountPickerLauncher.launch(
-                            GoogleDriveAuthHelper.createGoogleAccountPickerIntent(driveState.accountEmail)
-                        )
-                    }
                 }
         }
     }
@@ -391,11 +386,61 @@ private fun AiSmsManagerRoot(
         }
     }
 
+    val exportConversationTxtLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri ->
+        val payload = pendingExportText
+        pendingExportText = null
+        if (uri != null && payload != null) {
+            scope.launch {
+                runCatching {
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(payload.toByteArray(Charsets.UTF_8))
+                    } ?: error("Cannot open output stream")
+                }.onSuccess {
+                    Toast.makeText(context, strings.exportCompletedToast, Toast.LENGTH_SHORT).show()
+                }.onFailure { err ->
+                    Toast.makeText(context, err.localizedMessage ?: "Export failed", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    val exportConversationJsonLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        val payload = pendingExportText
+        pendingExportText = null
+        if (uri != null && payload != null) {
+            scope.launch {
+                runCatching {
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(payload.toByteArray(Charsets.UTF_8))
+                    } ?: error("Cannot open output stream")
+                }.onSuccess {
+                    Toast.makeText(context, strings.exportCompletedToast, Toast.LENGTH_SHORT).show()
+                }.onFailure { err ->
+                    Toast.makeText(context, err.localizedMessage ?: "Export failed", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    val startConversationExport: (String, ConversationExportFormat, String) -> Unit = { prefix, format, content ->
+        val safePrefix = prefix.replace(Regex("""[^a-zA-Z0-9_-]"""), "_").take(32).ifBlank { "export" }
+        val fileName = "${safePrefix}_${System.currentTimeMillis()}.${format.extension}"
+        pendingExportText = content
+        when (format) {
+            ConversationExportFormat.TEXT -> exportConversationTxtLauncher.launch(fileName)
+            ConversationExportFormat.JSON -> exportConversationJsonLauncher.launch(fileName)
+        }
+    }
+
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                mainVm.refreshSystemStatuses()
+                mainVm.ensureSmsObserverRegistered()
                 settingsVm.triggerAutoBackupIfDue()
             }
         }
@@ -498,7 +543,8 @@ private fun AiSmsManagerRoot(
 
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDest = backStackEntry?.destination
-    val isInThread = currentDest?.hasRoute<ThreadRoute>() == true
+    val isInSubScreen = currentDest?.hasRoute<ThreadRoute>() == true ||
+        currentDest?.hasRoute<ArchiveRoute>() == true
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val useRail = maxWidth >= 600.dp
@@ -546,7 +592,9 @@ private fun AiSmsManagerRoot(
                             }
                         },
                         onTogglePinThread = mainVm::setThreadPinned,
-                        onDeleteThread = { mainVm.deleteThread(it) }
+                        onDeleteThread = { mainVm.deleteThread(it) },
+                        onMarkAllRead = mainVm::markAllMessagesRead,
+                        onOpenArchive = { navController.navigate(ArchiveRoute) }
                     )
                 }
 
@@ -555,10 +603,7 @@ private fun AiSmsManagerRoot(
                         filterState = filterState,
                         localResults = localResults,
                         recentSearches = recentSearches,
-                        searchHistory = searchHistory,
-                        aiChatArchive = aiChatArchive,
                         selectedArchivedSearch = selectedArchivedSearch,
-                        selectedArchivedAiChat = selectedArchivedAiChat,
                         searchSavedTick = searchSavedTick,
                         isAiConfigured = settings.isAiConfigured,
                         topics = topics,
@@ -581,13 +626,7 @@ private fun AiSmsManagerRoot(
                         onOpenArchivedSearch = searchAiVm::openArchivedSearch,
                         onDismissArchivedSearch = searchAiVm::dismissArchivedSearch,
                         onRerunArchivedSearch = searchAiVm::rerunArchivedSearch,
-                        onDeleteArchivedSearch = searchAiVm::deleteArchivedSearch,
-                        onClearSearchHistory = searchAiVm::clearSearchHistory,
-                        onOpenArchivedAiChat = searchAiVm::openArchivedAiChat,
-                        onDismissArchivedAiChat = searchAiVm::dismissArchivedAiChat,
-                        onOpenTopicInAiChatScreen = { topicId ->
-                            navController.navigate(AIChatRoute(topicId = topicId))
-                        },
+                        onOpenArchive = { navController.navigate(ArchiveRoute) },
                         onSelectTopic = searchAiVm::selectTopic,
                         onNewTopic = searchAiVm::startNewTopic,
                         onDeleteTopic = searchAiVm::deleteTopic,
@@ -601,6 +640,55 @@ private fun AiSmsManagerRoot(
                         onConfirmScopeAndSend = { searchAiVm.confirmScopeAndSendIfPending(isPersian, strings) },
                         onOpenSettings = { navigateTopTab(SettingsRoute) },
                         onSearchResultClick = onSearchItemClicked
+                    )
+                }
+
+                composable<ArchiveRoute> {
+                    ArchiveScreen(
+                        searchHistory = searchHistory,
+                        aiChatArchive = aiChatArchive,
+                        selectedArchivedSearch = selectedArchivedSearch,
+                        selectedArchivedAiChat = selectedArchivedAiChat,
+                        xmlPreview = xmlPreview,
+                        onBack = { navController.popBackStack() },
+                        onOpenArchivedSearch = searchAiVm::openArchivedSearch,
+                        onDismissArchivedSearch = searchAiVm::dismissArchivedSearch,
+                        onRerunSearch = { entry ->
+                            searchAiVm.rerunArchivedSearch(entry)
+                            navController.popBackStack()
+                            navigateTopTab(SearchRoute)
+                        },
+                        onDeleteArchivedSearch = searchAiVm::deleteArchivedSearch,
+                        onClearSearchHistory = searchAiVm::clearSearchHistory,
+                        onOpenArchivedAiChat = searchAiVm::openArchivedAiChat,
+                        onDismissArchivedAiChat = searchAiVm::dismissArchivedAiChat,
+                        onContinueAiChat = { topic ->
+                            if (topic.originScreen == "AICHAT") {
+                                navController.navigate(AIChatRoute(topicId = topic.id))
+                            } else {
+                                searchAiVm.selectTopic(topic.id)
+                                navController.popBackStack()
+                                navigateTopTab(SearchRoute)
+                            }
+                        },
+                        onDeleteAiChatTopic = searchAiVm::deleteTopic,
+                        onExportAiChat = { topicId, format ->
+                            scope.launch {
+                                val exported = searchAiVm.exportTopic(topicId, format, isPersian)
+                                if (exported != null) {
+                                    startConversationExport("ai_chat_$topicId", format, exported)
+                                }
+                            }
+                        },
+                        onExportSearchEntry = { entry, format ->
+                            scope.launch {
+                                val exported = searchAiVm.exportSearchEntry(entry, format, isPersian)
+                                startConversationExport("search_archive_${entry.id}", format, exported)
+                            }
+                        },
+                        onShowExistingXml = searchAiVm::showExistingXml,
+                        onDismissXmlPreview = searchAiVm::dismissXmlPreview,
+                        onResultClick = onSearchItemClicked
                     )
                 }
 
@@ -667,6 +755,15 @@ private fun AiSmsManagerRoot(
                             aiChatVm.sendMessage(q, isPersian, strings)
                         },
                         onOpenSettings = { navigateTopTab(SettingsRoute) },
+                        onOpenArchive = { navController.navigate(ArchiveRoute) },
+                        onExportChat = { topicId, format ->
+                            scope.launch {
+                                val exported = aiChatVm.exportTopic(topicId, format, isPersian)
+                                if (exported != null) {
+                                    startConversationExport("ai_chat_$topicId", format, exported)
+                                }
+                            }
+                        },
                         onMatchedItemClick = onSearchItemClicked
                     )
                 }
@@ -746,6 +843,19 @@ private fun AiSmsManagerRoot(
                                 }
                             }
                         },
+                        onLaunchDriveLoopbackPkce = { clientId ->
+                            settingsVm.startLoopbackBrowserPkce(clientId, isPersian) { authUrl ->
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)).apply {
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                    )
+                                }.onFailure { err ->
+                                    settingsVm.onDriveAuthFailed(err.localizedMessage ?: "Cannot launch browser")
+                                }
+                            }
+                        },
                         onCompleteDriveBrowserPkce = { raw ->
                             val session = pendingPkceSession
                             if (session != null) {
@@ -785,6 +895,8 @@ private fun AiSmsManagerRoot(
                         .collectAsStateWithLifecycle(initialValue = emptyList())
                     val pinnedMessages by mainVm.observePinnedMessagesInThread(route.threadId)
                         .collectAsStateWithLifecycle(initialValue = emptyList())
+                    val threadAiHistory by mainVm.observeThreadAiHistory(route.threadId)
+                        .collectAsStateWithLifecycle(initialValue = emptyList())
 
                     ThreadScreen(
                         threadId = route.threadId,
@@ -792,6 +904,7 @@ private fun AiSmsManagerRoot(
                         targetMessageId = route.targetMessageId,
                         messages = threadMessages,
                         pinnedMessages = pinnedMessages,
+                        threadAiHistory = threadAiHistory,
                         hasSendSmsPermission = systemStatus.hasSendSmsPermission,
                         onRequestSmsPermissions = requestAllNeededPermissions,
                         onBack = { navController.popBackStack() },
@@ -808,6 +921,17 @@ private fun AiSmsManagerRoot(
                         },
                         onAskAiAboutThread = {
                             navController.navigate(AIChatRoute(source = "THREAD", threadId = route.threadId))
+                        },
+                        onOpenAiTopic = { topicId ->
+                            navController.navigate(AIChatRoute(topicId = topicId))
+                        },
+                        onExportThread = { format ->
+                            scope.launch {
+                                val exported = mainVm.exportThreadArchive(route.threadId, format, isPersian)
+                                if (exported != null) {
+                                    startConversationExport("sms_thread_${route.threadId}", format, exported)
+                                }
+                            }
                         }
                     )
                 }
@@ -816,7 +940,7 @@ private fun AiSmsManagerRoot(
 
         if (useRail) {
             Row(modifier = Modifier.fillMaxSize()) {
-                if (!isInThread) {
+                if (!isInSubScreen) {
                     NavigationRail {
                         NavigationRailItem(
                             selected = currentDest?.hasRoute<MessagesRoute>() == true,
@@ -881,7 +1005,7 @@ private fun AiSmsManagerRoot(
             Scaffold(
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 bottomBar = {
-                    if (!isInThread) {
+                    if (!isInSubScreen) {
                         NavigationBar {
                             NavigationBarItem(
                                 selected = currentDest?.hasRoute<MessagesRoute>() == true,
@@ -951,6 +1075,7 @@ private fun AiSmsManagerRoot(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(innerPadding)
+                        .consumeWindowInsets(innerPadding)
                 ) {
                     navHostContent(Modifier.fillMaxSize())
                 }
@@ -964,7 +1089,7 @@ private fun AiSmsManagerRoot(
             title = { Text("${notifItem.senderDisplayName} • ${notifItem.senderSecondary}") },
             text = {
                 Text(
-                    text = "${notifItem.body}\n\n${DateUtils.formatDateTime(notifItem.timestamp, calendarMode, usePersianDigits = isPersian)}",
+                    text = "${notifItem.body}\n\n${DateFormatter.formatDualTimestamp(notifItem.timestamp, calendarMode, usePersianDigits = isPersian)}",
                     style = MaterialTheme.typography.bodyMedium
                 )
             },

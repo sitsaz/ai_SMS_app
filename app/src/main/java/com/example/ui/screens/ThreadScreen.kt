@@ -35,6 +35,8 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PushPin
@@ -75,13 +77,17 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.core.localization.DateFormatter
 import com.example.core.localization.DateUtils
 import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
+import com.example.data.archive.ConversationExportFormat
+import com.example.data.local.AiTopicWithMessages
 import com.example.data.local.DeliveryStatus
 import com.example.data.local.SmsMessage
 import com.example.ui.components.DeliveryStatusIndicator
+import com.example.ui.components.MarkdownText
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -94,6 +100,7 @@ fun ThreadScreen(
     targetMessageId: Long,
     messages: List<SmsMessage>,
     pinnedMessages: List<SmsMessage> = emptyList(),
+    threadAiHistory: List<AiTopicWithMessages> = emptyList(),
     hasSendSmsPermission: Boolean = true,
     onRequestSmsPermissions: () -> Unit = {},
     onBack: () -> Unit,
@@ -102,7 +109,9 @@ fun ThreadScreen(
     onTogglePinMessage: (SmsMessage, Boolean) -> Unit = { _, _ -> },
     onDeleteMessage: (SmsMessage) -> Unit,
     onSaveContact: (String) -> Unit,
-    onAskAiAboutThread: () -> Unit = {}
+    onAskAiAboutThread: () -> Unit = {},
+    onOpenAiTopic: (Long) -> Unit = {},
+    onExportThread: (ConversationExportFormat) -> Unit = {}
 ) {
     val strings = LocalStrings.current
     val isPersian = LocalIsPersian.current
@@ -113,6 +122,8 @@ fun ThreadScreen(
     var draft by remember { mutableStateOf("") }
     var messagePendingDelete by remember { mutableStateOf<SmsMessage?>(null) }
     var showPinnedSheet by remember { mutableStateOf(false) }
+    var showThreadAiHistorySheet by remember { mutableStateOf(false) }
+    var showExportMenu by remember { mutableStateOf(false) }
     var copiedMsgId by remember { mutableLongStateOf(-1L) }
     val listState = rememberLazyListState()
 
@@ -195,11 +206,52 @@ fun ThreadScreen(
                             )
                         }
                     }
+                    if (threadAiHistory.isNotEmpty()) {
+                        IconButton(
+                            onClick = { showThreadAiHistorySheet = true },
+                            modifier = Modifier.testTag("thread_ai_history_button")
+                        ) {
+                            Icon(
+                                Icons.Default.History,
+                                contentDescription = strings.threadAiHistoryBanner,
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                        }
+                    }
                     IconButton(
                         onClick = onAskAiAboutThread,
                         modifier = Modifier.testTag("thread_ask_ai_button")
                     ) {
                         Icon(Icons.Default.AutoAwesome, contentDescription = strings.askAiAboutThread)
+                    }
+                    if (messages.isNotEmpty()) {
+                        Box {
+                            IconButton(
+                                onClick = { showExportMenu = true },
+                                modifier = Modifier.testTag("thread_export_button")
+                            ) {
+                                Icon(Icons.Default.FileDownload, contentDescription = strings.exportConversation)
+                            }
+                            DropdownMenu(
+                                expanded = showExportMenu,
+                                onDismissRequest = { showExportMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(strings.exportAsText) },
+                                    onClick = {
+                                        showExportMenu = false
+                                        onExportThread(ConversationExportFormat.TEXT)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(strings.exportAsJson) },
+                                    onClick = {
+                                        showExportMenu = false
+                                        onExportThread(ConversationExportFormat.JSON)
+                                    }
+                                )
+                            }
+                        }
                     }
                     IconButton(
                         onClick = { onSaveContact(address) },
@@ -306,6 +358,60 @@ fun ThreadScreen(
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                }
+            }
+
+            AnimatedVisibility(visible = threadAiHistory.isNotEmpty()) {
+                val latestTopic = threadAiHistory.firstOrNull()
+                if (latestTopic != null) {
+                    val latestAnswer = latestTopic.messages
+                        .lastOrNull { it.role == "ASSISTANT" && !it.isError }?.text
+                        ?: latestTopic.messages.firstOrNull()?.text.orEmpty()
+                    Surface(
+                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.55f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showThreadAiHistorySheet = true }
+                            .testTag("thread_ai_history_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.History,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.tertiary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "${strings.threadAiHistoryBanner} (${DateUtils.formatNumber(threadAiHistory.size, isPersian)})",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                                )
+                                if (latestAnswer.isNotBlank()) {
+                                    Text(
+                                        text = latestAnswer,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.85f)
+                                    )
+                                }
+                            }
+                            Text(
+                                text = strings.viewAllPinned,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.tertiary
                             )
                         }
                     }
@@ -436,7 +542,7 @@ fun ThreadScreen(
                                             )
                                         }
                                         Text(
-                                            text = DateUtils.formatDateTime(msg.timestamp, calendarMode, usePersianDigits = isPersian),
+                                            text = DateFormatter.formatChatTimestamp(msg.timestamp, calendarMode, usePersianDigits = isPersian),
                                             style = MaterialTheme.typography.labelSmall,
                                             color = contentColor.copy(alpha = 0.72f)
                                         )
@@ -584,7 +690,7 @@ fun ThreadScreen(
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
                                         Text(
-                                            text = DateUtils.formatDateTime(pinned.timestamp, calendarMode, usePersianDigits = isPersian),
+                                            text = DateFormatter.formatChatTimestamp(pinned.timestamp, calendarMode, usePersianDigits = isPersian),
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -644,5 +750,107 @@ fun ThreadScreen(
                 }
             }
         )
+    }
+
+    if (showThreadAiHistorySheet) {
+        ModalBottomSheet(onDismissRequest = { showThreadAiHistorySheet = false }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "${strings.threadAiHistoryBanner} (${DateUtils.formatNumber(threadAiHistory.size, isPersian)})",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                if (threadAiHistory.isEmpty()) {
+                    Text(
+                        text = strings.noThreadAiHistory,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 24.dp)
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 440.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(threadAiHistory, key = { it.topic.id }) { session ->
+                            val userMsg = session.messages.lastOrNull { it.role == "USER" }
+                            val assistantMsg = session.messages.lastOrNull { it.role == "ASSISTANT" }
+                            Card(
+                                shape = RoundedCornerShape(14.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("thread_ai_history_card_${session.topic.id}")
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = session.topic.title,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text = DateFormatter.formatDualTimestamp(session.topic.updatedAt, calendarMode, usePersianDigits = isPersian),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    if (assistantMsg != null) {
+                                        MarkdownText(
+                                            markdown = assistantMsg.text,
+                                            textColor = MaterialTheme.colorScheme.onSurface,
+                                            baseStyle = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                    if (userMsg != null && userMsg.xmlSummaryLabel.isNotBlank()) {
+                                        Text(
+                                            text = userMsg.xmlSummaryLabel,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.End
+                                    ) {
+                                        if (assistantMsg != null) {
+                                            TextButton(
+                                                onClick = { clipboard.setText(AnnotatedString(assistantMsg.text)) }
+                                            ) {
+                                                Text(strings.copyMessage)
+                                            }
+                                        }
+                                        TextButton(
+                                            onClick = {
+                                                showThreadAiHistorySheet = false
+                                                onOpenAiTopic(session.topic.id)
+                                            }
+                                        ) {
+                                            Text(strings.continueAiChat)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

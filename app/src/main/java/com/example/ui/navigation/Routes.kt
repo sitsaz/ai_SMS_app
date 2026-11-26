@@ -27,3 +27,6 @@ data class ThreadRoute(
     val address: String,
     val targetMessageId: Long = -1L
 )
+
+@Serializable
+data object ArchiveRoute

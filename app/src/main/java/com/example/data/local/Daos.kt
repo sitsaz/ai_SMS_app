@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
@@ -136,8 +137,64 @@ interface SmsDao {
     @Query("DELETE FROM pinned_threads WHERE threadId = :threadId")
     suspend fun unpinThread(threadId: Long)
 
+    @Query("SELECT * FROM sms_messages WHERE threadId = :threadId AND isOutgoing = 0 ORDER BY timestamp ASC, id ASC")
+    fun observeIncomingThreadMessages(threadId: Long): Flow<List<SmsMessage>>
+
+    @Query("SELECT * FROM sms_messages WHERE threadId = :threadId ORDER BY timestamp ASC, id ASC")
+    suspend fun getThreadMessagesOnce(threadId: Long): List<SmsMessage>
+
+    @Query("SELECT DISTINCT threadId FROM sms_messages")
+    suspend fun getAllThreadIds(): List<Long>
+
     @Query("SELECT COUNT(*) FROM pinned_threads WHERE threadId = :threadId")
     suspend fun isThreadPinned(threadId: Long): Int
+
+    @Query("UPDATE sms_messages SET isRead = 1 WHERE isRead = 0")
+    suspend fun markAllMessagesRead()
+
+    @Query("SELECT systemSmsId, isPinned, pinnedAt FROM sms_messages WHERE systemSmsId IS NOT NULL AND isPinned = 1")
+    suspend fun getPinnedSystemSmsMeta(): List<PinnedSystemSmsMeta>
+}
+
+data class PinnedSystemSmsMeta(
+    val systemSmsId: Long,
+    val isPinned: Boolean,
+    val pinnedAt: Long
+)
+
+@Dao
+interface SmsThreadDao {
+    @Query("SELECT * FROM sms_threads ORDER BY isPinned DESC, pinnedAt DESC, lastMessageTimestamp DESC")
+    fun observeThreads(): Flow<List<SmsThreadEntity>>
+
+    @Transaction
+    @Query("SELECT * FROM sms_threads ORDER BY isPinned DESC, pinnedAt DESC, lastMessageTimestamp DESC")
+    fun observeThreadsWithMessages(): Flow<List<SmsThreadWithMessages>>
+
+    @Transaction
+    @Query("SELECT * FROM sms_threads WHERE threadId = :threadId LIMIT 1")
+    fun observeThreadWithMessages(threadId: Long): Flow<SmsThreadWithMessages?>
+
+    @Query("SELECT * FROM sms_threads WHERE threadId = :threadId LIMIT 1")
+    suspend fun getThreadById(threadId: Long): SmsThreadEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertThread(thread: SmsThreadEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertThreads(threads: List<SmsThreadEntity>)
+
+    @Query("UPDATE sms_threads SET unreadCount = 0, updatedAt = :updatedAt WHERE threadId = :threadId")
+    suspend fun markThreadRead(threadId: Long, updatedAt: Long = System.currentTimeMillis())
+
+    @Query("UPDATE sms_threads SET isPinned = :pinned, pinnedAt = :pinnedAt, updatedAt = :updatedAt WHERE threadId = :threadId")
+    suspend fun updateThreadPin(threadId: Long, pinned: Boolean, pinnedAt: Long, updatedAt: Long = System.currentTimeMillis())
+
+    @Query("UPDATE sms_threads SET unreadCount = 0, updatedAt = :updatedAt WHERE unreadCount > 0")
+    suspend fun markAllThreadsRead(updatedAt: Long = System.currentTimeMillis())
+
+    @Query("DELETE FROM sms_threads WHERE threadId = :threadId")
+    suspend fun deleteThread(threadId: Long)
 }
 
 @Dao
@@ -218,6 +275,9 @@ interface NotificationDao {
     @Query("SELECT COUNT(*) FROM notification_items WHERE notificationKey = :key AND timestamp = :timestamp AND body = :body")
     suspend fun countExactMatch(key: String, timestamp: Long, body: String): Int
 
+    @Query("UPDATE notification_items SET isRead = 1 WHERE isRead = 0")
+    suspend fun markAllNotificationsRead()
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAllIgnore(notifications: List<NotificationItem>)
 }
@@ -251,8 +311,26 @@ interface AiTopicDao {
     @Query("SELECT * FROM ai_chat_messages WHERE topicId = :topicId ORDER BY timestamp ASC, id ASC")
     suspend fun getMessagesForTopicOnce(topicId: Long): List<AiChatMessageEntity>
 
+    @Transaction
+    @Query("SELECT * FROM ai_topics ORDER BY updatedAt DESC")
+    fun observeTopicsWithMessages(): Flow<List<AiTopicWithMessages>>
+
+    @Transaction
+    @Query("SELECT * FROM ai_topics WHERE selectedThreadId = :threadId ORDER BY updatedAt DESC")
+    fun observeTopicsForSmsThread(threadId: Long): Flow<List<AiTopicWithMessages>>
+
+    @Transaction
+    @Query("SELECT * FROM ai_topics WHERE id = :topicId LIMIT 1")
+    fun observeTopicWithMessages(topicId: Long): Flow<AiTopicWithMessages?>
+
+    @Query("SELECT * FROM ai_chat_messages WHERE xmlContent != '' ORDER BY timestamp DESC")
+    fun observeXmlChatLogs(): Flow<List<AiChatMessageEntity>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertChatMessage(message: AiChatMessageEntity): Long
+
+    @Query("DELETE FROM ai_chat_messages WHERE id = :messageId")
+    suspend fun deleteChatMessage(messageId: Long)
 }
 
 @Dao
