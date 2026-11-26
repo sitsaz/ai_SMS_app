@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -70,7 +71,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.core.localization.AppStrings
+import com.example.core.localization.CalendarMode
 import com.example.core.localization.DateUtils
+import com.example.core.localization.LocalCalendarMode
 import com.example.data.ai.XmlArchiveBuildResult
 import com.example.data.local.DeliveryStatus
 import com.example.data.search.ArchiveItemSource
@@ -184,7 +187,8 @@ fun SearchResultCard(
     isPersian: Boolean,
     strings: AppStrings,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    calendarMode: CalendarMode = LocalCalendarMode.current
 ) {
     val isNotif = item.source == ArchiveItemSource.NOTIFICATION
     val highlightBg = MaterialTheme.colorScheme.primaryContainer
@@ -289,7 +293,7 @@ fun SearchResultCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = DateUtils.formatDateTime(item.timestamp, isPersian),
+                    text = DateUtils.formatDateTime(item.timestamp, calendarMode, usePersianDigits = isPersian),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -550,17 +554,18 @@ fun BilingualDateRangeDialog(
     initialEndMs: Long,
     strings: AppStrings,
     onDismiss: () -> Unit,
-    onConfirm: (Long, Long) -> Unit
+    onConfirm: (Long, Long) -> Unit,
+    calendarMode: CalendarMode = LocalCalendarMode.current
 ) {
     val now = System.currentTimeMillis()
     val defaultStart = if (initialStartMs > 0L) initialStartMs else now - 6L * 86_400_000L
     val defaultEnd = if (initialEndMs > 0L) initialEndMs else now
 
-    val startInit = remember(defaultStart, isPersian) {
-        DateUtils.getYearMonthDay(defaultStart, isPersian)
+    val startInit = remember(defaultStart, calendarMode) {
+        DateUtils.getYearMonthDay(defaultStart, calendarMode)
     }
-    val endInit = remember(defaultEnd, isPersian) {
-        DateUtils.getYearMonthDay(defaultEnd, isPersian)
+    val endInit = remember(defaultEnd, calendarMode) {
+        DateUtils.getYearMonthDay(defaultEnd, calendarMode)
     }
 
     var sYear by remember(startInit) { mutableIntStateOf(startInit.first) }
@@ -582,15 +587,16 @@ fun BilingualDateRangeDialog(
                     month = sMonth,
                     day = sDay,
                     isPersian = isPersian,
+                    calendarMode = calendarMode,
                     strings = strings,
                     onYearChange = { y ->
                         sYear = y
-                        val maxD = DateUtils.daysInMonth(y, sMonth, isPersian)
+                        val maxD = DateUtils.daysInMonth(y, sMonth, calendarMode)
                         if (sDay > maxD) sDay = maxD
                     },
                     onMonthChange = { m ->
                         sMonth = m
-                        val maxD = DateUtils.daysInMonth(sYear, m, isPersian)
+                        val maxD = DateUtils.daysInMonth(sYear, m, calendarMode)
                         if (sDay > maxD) sDay = maxD
                     },
                     onDayChange = { sDay = it }
@@ -602,15 +608,16 @@ fun BilingualDateRangeDialog(
                     month = eMonth,
                     day = eDay,
                     isPersian = isPersian,
+                    calendarMode = calendarMode,
                     strings = strings,
                     onYearChange = { y ->
                         eYear = y
-                        val maxD = DateUtils.daysInMonth(y, eMonth, isPersian)
+                        val maxD = DateUtils.daysInMonth(y, eMonth, calendarMode)
                         if (eDay > maxD) eDay = maxD
                     },
                     onMonthChange = { m ->
                         eMonth = m
-                        val maxD = DateUtils.daysInMonth(eYear, m, isPersian)
+                        val maxD = DateUtils.daysInMonth(eYear, m, calendarMode)
                         if (eDay > maxD) eDay = maxD
                     },
                     onDayChange = { eDay = it }
@@ -620,8 +627,8 @@ fun BilingualDateRangeDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val startMs = DateUtils.toEpochMillis(sYear, sMonth, sDay, isPersian, endOfDay = false)
-                    val endMs = DateUtils.toEpochMillis(eYear, eMonth, eDay, isPersian, endOfDay = true)
+                    val startMs = DateUtils.toEpochMillis(sYear, sMonth, sDay, calendarMode, endOfDay = false)
+                    val endMs = DateUtils.toEpochMillis(eYear, eMonth, eDay, calendarMode, endOfDay = true)
                     val orderedStart = minOf(startMs, endMs)
                     val orderedEnd = maxOf(startMs, endMs)
                     onConfirm(orderedStart, orderedEnd)
@@ -645,13 +652,14 @@ private fun DateStepperSection(
     month: Int,
     day: Int,
     isPersian: Boolean,
+    calendarMode: CalendarMode,
     strings: AppStrings,
     onYearChange: (Int) -> Unit,
     onMonthChange: (Int) -> Unit,
     onDayChange: (Int) -> Unit
 ) {
-    val maxDay = DateUtils.daysInMonth(year, month, isPersian)
-    val monthLabel = DateUtils.monthName(month, isPersian)
+    val maxDay = DateUtils.daysInMonth(year, month, calendarMode)
+    val monthLabel = DateUtils.monthName(month, calendarMode)
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
@@ -705,4 +713,110 @@ private fun MiniStepper(
             }
         }
     }
+}
+
+@Composable
+fun SmsPermissionRationaleDialog(
+    strings: AppStrings,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Default.Security,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
+        title = {
+            Text(
+                text = strings.smsRationaleTitle,
+                style = MaterialTheme.typography.titleLarge
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = strings.smsRationaleBody,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(strings.smsRationaleReadPoint, style = MaterialTheme.typography.bodySmall)
+                        Text(strings.smsRationaleSendPoint, style = MaterialTheme.typography.bodySmall)
+                        Text(strings.smsRationaleContactsPoint, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                modifier = Modifier.testTag("sms_rationale_continue_button")
+            ) {
+                Text(strings.continueAction)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("sms_rationale_cancel_button")
+            ) {
+                Text(strings.cancel)
+            }
+        }
+    )
+}
+
+@Composable
+fun SmsPermissionSettingsDialog(
+    strings: AppStrings,
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Default.Sms,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error
+            )
+        },
+        title = {
+            Text(
+                text = strings.smsPermissionDeniedTitle,
+                style = MaterialTheme.typography.titleLarge
+            )
+        },
+        text = {
+            Text(
+                text = strings.smsPermissionDeniedBody,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = onOpenSettings,
+                modifier = Modifier.testTag("sms_permission_open_settings_button")
+            ) {
+                Text(strings.openAppPermissions)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(strings.cancel)
+            }
+        }
+    )
 }

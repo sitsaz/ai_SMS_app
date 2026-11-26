@@ -31,6 +31,12 @@ enum class AiProviderType {
     CUSTOM
 }
 
+enum class AiContextMode {
+    COMPACT_TEXT,
+    KEYWORD_PREFILTER,
+    INLINE_XML
+}
+
 enum class ThemeMode {
     SYSTEM,
     LIGHT,
@@ -152,7 +158,8 @@ data class AiTopicEntity(
     val customEndMs: Long = 0L,
     val maxItems: Int = 150,
     val includeSms: Boolean = true,
-    val includeNotifications: Boolean = true
+    val includeNotifications: Boolean = true,
+    val contextMode: String = AiContextMode.COMPACT_TEXT.name
 )
 
 @Entity(
@@ -175,6 +182,7 @@ data class AiChatMessageEntity(
     val xmlSummaryLabel: String = "",
     val xmlContent: String = "",
     val matchedRefsCsv: String = "",
+    val structuredJson: String = "",
     val timestamp: Long,
     val isError: Boolean = false
 )

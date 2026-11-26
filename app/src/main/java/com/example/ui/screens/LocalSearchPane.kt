@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.core.localization.DateUtils
+import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
 import com.example.data.local.SearchDirectionFilter
@@ -62,6 +63,7 @@ fun LocalSearchPane(
 ) {
     val strings = LocalStrings.current
     val isPersian = LocalIsPersian.current
+    val calendarMode = LocalCalendarMode.current
     var showDateDialog by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -177,8 +179,8 @@ fun LocalSearchPane(
                 },
                 label = {
                     if (filterState.startMs > 0L) {
-                        val s = DateUtils.formatDateShort(filterState.startMs, isPersian)
-                        val e = DateUtils.formatDateShort(filterState.endMs, isPersian)
+                        val s = DateUtils.formatDateShort(filterState.startMs, calendarMode, usePersianDigits = isPersian)
+                        val e = DateUtils.formatDateShort(filterState.endMs, calendarMode, usePersianDigits = isPersian)
                         Text("$s – $e")
                     } else {
                         Text(strings.filterDateRange)

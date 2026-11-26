@@ -6,8 +6,11 @@ import androidx.lifecycle.viewModelScope
 import com.example.AiSmsApplication
 import com.example.core.localization.AppStrings
 import com.example.core.localization.DateUtils
+import com.example.data.ai.AiParsedSearchResponse
+import com.example.data.ai.AiXmlResponseParser
 import com.example.data.ai.XmlArchiveBuildResult
 import com.example.data.local.AiChatMessageEntity
+import com.example.data.local.AiContextMode
 import com.example.data.local.AiTopicEntity
 import com.example.data.local.ArchiveRangePreset
 import com.example.data.local.SearchDirectionFilter
@@ -19,7 +22,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -41,12 +43,14 @@ data class AiScopeDraft(
     val customEndMs: Long = 0L,
     val maxItems: Int = 150,
     val includeSms: Boolean = true,
-    val includeNotifications: Boolean = true
+    val includeNotifications: Boolean = true,
+    val contextMode: AiContextMode = AiContextMode.COMPACT_TEXT
 )
 
 data class AiChatDisplayMessage(
     val entity: AiChatMessageEntity,
-    val matchedItems: List<SearchResultItem>
+    val matchedItems: List<SearchResultItem>,
+    val parsedResponse: AiParsedSearchResponse? = null
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -95,12 +99,17 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
             } else {
                 aiTopicDao.observeMessagesForTopic(id).map { list ->
                     list.map { entity ->
+                        val parsed = AiXmlResponseParser.decodeFromJson(entity.structuredJson)
                         val refs = entity.matchedRefsCsv
                             .split(',')
                             .map { it.trim() }
                             .filter { it.isNotEmpty() }
                         val hydrated = searchRepo.hydrateRefs(refs)
-                        AiChatDisplayMessage(entity = entity, matchedItems = hydrated)
+                        AiChatDisplayMessage(
+                            entity = entity,
+                            matchedItems = hydrated,
+                            parsedResponse = parsed
+                        )
                     }
                 }
             }
@@ -164,13 +173,16 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                 if (topic != null) {
                     val preset = runCatching { ArchiveRangePreset.valueOf(topic.rangePreset) }
                         .getOrDefault(ArchiveRangePreset.ONE_WEEK)
+                    val ctxMode = runCatching { AiContextMode.valueOf(topic.contextMode) }
+                        .getOrDefault(AiContextMode.COMPACT_TEXT)
                     _scopeDraft.value = AiScopeDraft(
                         preset = preset,
                         customStartMs = topic.customStartMs,
                         customEndMs = topic.customEndMs,
                         maxItems = topic.maxItems,
                         includeSms = topic.includeSms,
-                        includeNotifications = topic.includeNotifications
+                        includeNotifications = topic.includeNotifications,
+                        contextMode = ctxMode
                     )
                     refreshDraftCounts()
                 }
@@ -234,7 +246,10 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
     fun generateXmlPreview(isPersian: Boolean, strings: AppStrings) {
         viewModelScope.launch {
             val d = _scopeDraft.value
-            _xmlPreview.value = xmlBuilder.buildXml(
+            val queryHint = _pendingQuestion.value.orEmpty()
+            _xmlPreview.value = xmlBuilder.buildContextForAi(
+                question = queryHint,
+                contextMode = d.contextMode,
                 preset = d.preset,
                 customStartMs = d.customStartMs,
                 customEndMs = d.customEndMs,
@@ -287,7 +302,8 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                         customEndMs = draft.customEndMs,
                         maxItems = draft.maxItems,
                         includeSms = draft.includeSms,
-                        includeNotifications = draft.includeNotifications
+                        includeNotifications = draft.includeNotifications,
+                        contextMode = draft.contextMode.name
                     )
                 )
                 _activeTopicId.value = topicId
@@ -302,7 +318,8 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                             customEndMs = draft.customEndMs,
                             maxItems = draft.maxItems,
                             includeSms = draft.includeSms,
-                            includeNotifications = draft.includeNotifications
+                            includeNotifications = draft.includeNotifications,
+                            contextMode = draft.contextMode.name
                         )
                     )
                 }
@@ -312,7 +329,9 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
 
             _isAiSending.value = true
             try {
-                val xmlResult = xmlBuilder.buildXml(
+                val contextResult = xmlBuilder.buildContextForAi(
+                    question = question,
+                    contextMode = draft.contextMode,
                     preset = draft.preset,
                     customStartMs = draft.customStartMs,
                     customEndMs = draft.customEndMs,
@@ -322,12 +341,17 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                     isPersian = isPersian,
                     strings = strings
                 )
-                val kb = String.format(java.util.Locale.US, "%.1f KB", xmlResult.totalBytes / 1024.0)
-                val countNum = DateUtils.formatNumber(xmlResult.totalCount, isPersian)
+                val kb = String.format(java.util.Locale.US, "%.1f KB", contextResult.totalBytes / 1024.0)
+                val countNum = DateUtils.formatNumber(contextResult.totalCount, isPersian)
+                val modeTag = when (draft.contextMode) {
+                    AiContextMode.COMPACT_TEXT -> if (isPersian) "متن فشرده" else "Compact Text"
+                    AiContextMode.KEYWORD_PREFILTER -> if (isPersian) "فیلتر FTS" else "FTS Digest"
+                    AiContextMode.INLINE_XML -> "XML"
+                }
                 val summaryLabel = if (isPersian) {
-                    "${xmlResult.rangeLabel} • $countNum مورد • $kb XML"
+                    "${contextResult.rangeLabel} • $countNum مورد • $kb $modeTag"
                 } else {
-                    "${xmlResult.rangeLabel} • $countNum items • $kb XML"
+                    "${contextResult.rangeLabel} • $countNum items • $kb $modeTag"
                 }
 
                 val priorHistory = aiTopicDao.getMessagesForTopicOnce(topicId)
@@ -338,27 +362,29 @@ class SearchAndAiViewModel(application: Application) : AndroidViewModel(applicat
                         role = "USER",
                         text = question,
                         xmlSummaryLabel = summaryLabel,
-                        xmlContent = xmlResult.xmlContent,
+                        xmlContent = contextResult.xmlContent,
                         timestamp = System.currentTimeMillis()
                     )
                 )
 
                 val settings = settingsRepo.getCurrentSettings()
-                val aiResult = aiClient.askWithXmlArchive(
+                val aiResult = aiClient.askWithSearchContext(
                     settings = settings,
                     userQuestion = question,
-                    xmlArchive = xmlResult.xmlContent,
+                    contextPayload = contextResult.xmlContent,
+                    contextMode = draft.contextMode,
                     priorHistory = priorHistory,
                     isPersian = isPersian
                 )
 
-                aiResult.onSuccess { response ->
+                aiResult.onSuccess { parsed ->
                     aiTopicDao.insertChatMessage(
                         AiChatMessageEntity(
                             topicId = topicId,
                             role = "ASSISTANT",
-                            text = response.answer,
-                            matchedRefsCsv = response.matchedRefs.joinToString(","),
+                            text = parsed.answer,
+                            matchedRefsCsv = parsed.matchedRefs.joinToString(","),
+                            structuredJson = AiXmlResponseParser.encodeToJson(parsed),
                             timestamp = System.currentTimeMillis(),
                             isError = false
                         )

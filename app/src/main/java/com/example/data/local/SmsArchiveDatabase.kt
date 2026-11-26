@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [
@@ -14,7 +16,7 @@ import androidx.room.RoomDatabase
         AiTopicEntity::class,
         AiChatMessageEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class SmsArchiveDatabase : RoomDatabase() {
@@ -26,6 +28,13 @@ abstract class SmsArchiveDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: SmsArchiveDatabase? = null
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE ai_topics ADD COLUMN contextMode TEXT NOT NULL DEFAULT 'COMPACT_TEXT'")
+                db.execSQL("ALTER TABLE ai_chat_messages ADD COLUMN structuredJson TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         fun getInstance(context: Context): SmsArchiveDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -33,6 +42,7 @@ abstract class SmsArchiveDatabase : RoomDatabase() {
                     SmsArchiveDatabase::class.java,
                     "ai_sms_manager.db"
                 )
+                    .addMigrations(MIGRATION_3_4)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }

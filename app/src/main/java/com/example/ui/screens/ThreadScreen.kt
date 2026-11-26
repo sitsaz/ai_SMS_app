@@ -29,10 +29,14 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -55,6 +59,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.core.localization.DateUtils
+import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
 import com.example.data.local.DeliveryStatus
@@ -70,6 +75,8 @@ fun ThreadScreen(
     address: String,
     targetMessageId: Long,
     messages: List<SmsMessage>,
+    hasSendSmsPermission: Boolean = true,
+    onRequestSmsPermissions: () -> Unit = {},
     onBack: () -> Unit,
     onMarkRead: () -> Unit,
     onSendSms: (String) -> Unit,
@@ -78,6 +85,7 @@ fun ThreadScreen(
 ) {
     val strings = LocalStrings.current
     val isPersian = LocalIsPersian.current
+    val calendarMode = LocalCalendarMode.current
     var draft by remember { mutableStateOf("") }
     var messagePendingDelete by remember { mutableStateOf<SmsMessage?>(null) }
     val listState = rememberLazyListState()
@@ -173,13 +181,17 @@ fun ThreadScreen(
                     Spacer(Modifier.width(8.dp))
                     FilledIconButton(
                         onClick = {
-                            val text = draft.trim()
-                            if (text.isNotEmpty()) {
-                                onSendSms(text)
-                                draft = ""
+                            if (!hasSendSmsPermission) {
+                                onRequestSmsPermissions()
+                            } else {
+                                val text = draft.trim()
+                                if (text.isNotEmpty()) {
+                                    onSendSms(text)
+                                    draft = ""
+                                }
                             }
                         },
-                        enabled = draft.isNotBlank(),
+                        enabled = draft.isNotBlank() || !hasSendSmsPermission,
                         modifier = Modifier
                             .size(48.dp)
                             .testTag("sms_send_button")
@@ -190,15 +202,71 @@ fun ThreadScreen(
             }
         }
     ) { innerPadding ->
-        LazyColumn(
-            state = listState,
+        Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding),
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(innerPadding)
         ) {
-            items(messages, key = { it.id }) { msg ->
+            if (!hasSendSmsPermission) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Security,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                        Text(
+                            text = strings.sendSmsPermissionBanner,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilledTonalButton(
+                            onClick = onRequestSmsPermissions,
+                            modifier = Modifier.testTag("thread_grant_send_sms_button")
+                        ) {
+                            Text(strings.grantPermissions)
+                        }
+                    }
+                }
+            }
+
+            if (messages.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = strings.emptyThreadHint,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(messages, key = { it.id }) { msg ->
                 val isHighlighted = msg.id == highlightedId
                 val status = runCatching { DeliveryStatus.valueOf(msg.deliveryStatus) }
                     .getOrDefault(DeliveryStatus.NONE)
@@ -252,7 +320,7 @@ fun ThreadScreen(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = DateUtils.formatDateTime(msg.timestamp, isPersian),
+                                    text = DateUtils.formatDateTime(msg.timestamp, calendarMode, usePersianDigits = isPersian),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = contentColor.copy(alpha = 0.72f)
                                 )
@@ -269,6 +337,8 @@ fun ThreadScreen(
                 }
             }
         }
+    }
+    }
     }
 
     messagePendingDelete?.let { msg ->

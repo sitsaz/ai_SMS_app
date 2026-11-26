@@ -101,6 +101,15 @@ interface SmsDao {
 
     @Query("SELECT COALESCE(MAX(threadId), 1000) + 1 FROM sms_messages")
     suspend fun nextSyntheticThreadId(): Long
+
+    @Query("SELECT * FROM sms_messages ORDER BY timestamp DESC")
+    suspend fun getAllForBackup(): List<SmsMessage>
+
+    @Query("SELECT COUNT(*) FROM sms_messages WHERE normalizedAddress = :normalizedAddress AND timestamp = :timestamp AND body = :body")
+    suspend fun countExactMatch(normalizedAddress: String, timestamp: Long, body: String): Int
+
+    @Query("SELECT threadId FROM sms_messages WHERE normalizedAddress = :normalizedAddress ORDER BY timestamp DESC LIMIT 1")
+    suspend fun findThreadIdByNormalizedAddress(normalizedAddress: String): Long?
 }
 
 @Dao
@@ -158,6 +167,15 @@ interface NotificationDao {
 
     @Query("DELETE FROM notification_items")
     suspend fun clearAll()
+
+    @Query("SELECT * FROM notification_items ORDER BY timestamp DESC")
+    suspend fun getAllForBackup(): List<NotificationItem>
+
+    @Query("SELECT COUNT(*) FROM notification_items WHERE notificationKey = :key AND timestamp = :timestamp AND body = :body")
+    suspend fun countExactMatch(key: String, timestamp: Long, body: String): Int
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAllIgnore(notifications: List<NotificationItem>)
 }
 
 @Dao

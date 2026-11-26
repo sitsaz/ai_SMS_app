@@ -17,12 +17,24 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -42,6 +54,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -51,6 +64,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -58,15 +72,20 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.BuildConfig
 import com.example.core.localization.AppLanguage
+import com.example.core.localization.CalendarPreference
 import com.example.core.localization.DateUtils
+import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
+import com.example.data.ai.AiSearchClient
 import com.example.data.local.AiProviderType
 import com.example.data.local.ThemeMode
 import com.example.data.preferences.AppSettings
 import com.example.data.preferences.SettingsRepository
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.viewmodel.ConnectionTestState
+import com.example.ui.viewmodel.DriveBackupUiState
+import com.example.ui.viewmodel.ModelsFetchState
 import com.example.ui.viewmodel.SystemStatusState
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -75,24 +94,40 @@ fun SettingsScreen(
     settings: AppSettings,
     systemStatus: SystemStatusState,
     testState: ConnectionTestState,
+    modelsState: ModelsFetchState,
+    driveState: DriveBackupUiState,
     onLanguageChange: (AppLanguage) -> Unit,
+    onCalendarPreferenceChange: (CalendarPreference) -> Unit,
     onThemeModeChange: (ThemeMode) -> Unit,
     onDynamicColorChange: (Boolean) -> Unit,
     onCaptureNotificationsChange: (Boolean) -> Unit,
     onRequestDefaultSms: () -> Unit,
     onOpenNotificationListenerSettings: () -> Unit,
     onSaveAiConfig: (AiProviderType, String, String, String) -> Unit,
-    onTestAiConnection: (AiProviderType, String, String, String) -> Unit
+    onTestAiConnection: (AiProviderType, String, String, String) -> Unit,
+    onFetchModels: (AiProviderType, String, String) -> Unit,
+    onClearAiConfig: () -> Unit,
+    onBackupScopeChange: (Boolean, Boolean) -> Unit,
+    onConnectGoogleDrive: () -> Unit,
+    onDisconnectGoogleDrive: () -> Unit,
+    onRefreshDriveBackups: () -> Unit,
+    onBackupToGoogleDrive: () -> Unit,
+    onRestoreFromGoogleDrive: (String) -> Unit,
+    onDeleteDriveBackup: (String) -> Unit,
+    onExportLocalBackup: () -> Unit,
+    onImportLocalBackup: () -> Unit
 ) {
     val strings = LocalStrings.current
     val isPersian = LocalIsPersian.current
+    val calendarMode = LocalCalendarMode.current
+    val clipboard = LocalClipboardManager.current
 
     var provider by remember(settings.aiProviderType) { mutableStateOf(settings.aiProviderType) }
     var baseUrl by remember(settings.aiBaseUrl) { mutableStateOf(settings.aiBaseUrl) }
     var modelName by remember(settings.aiModelName) { mutableStateOf(settings.aiModelName) }
     var apiKey by remember(settings.aiApiKey) { mutableStateOf(settings.aiApiKey) }
     var showKey by remember { mutableStateOf(false) }
-    var savedBanner by remember { mutableStateOf(false) }
+    var inlineStatusMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(settings.aiProviderType, settings.aiBaseUrl, settings.aiModelName, settings.aiApiKey) {
         provider = settings.aiProviderType
@@ -148,6 +183,36 @@ fun SettingsScreen(
                         onClick = { onLanguageChange(AppLanguage.PERSIAN) },
                         label = { Text(strings.languagePersian) },
                         modifier = Modifier.testTag("lang_persian_chip")
+                    )
+                }
+
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
+                Spacer(Modifier.height(10.dp))
+
+                Text(strings.calendarModeLabel, style = MaterialTheme.typography.labelLarge)
+                Spacer(Modifier.height(6.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FilterChip(
+                        selected = settings.calendarPreference == CalendarPreference.AUTO,
+                        onClick = { onCalendarPreferenceChange(CalendarPreference.AUTO) },
+                        label = { Text(strings.calendarAuto) },
+                        modifier = Modifier.testTag("calendar_auto_chip")
+                    )
+                    FilterChip(
+                        selected = settings.calendarPreference == CalendarPreference.JALALI,
+                        onClick = { onCalendarPreferenceChange(CalendarPreference.JALALI) },
+                        label = { Text(strings.calendarJalali) },
+                        modifier = Modifier.testTag("calendar_jalali_chip")
+                    )
+                    FilterChip(
+                        selected = settings.calendarPreference == CalendarPreference.GREGORIAN,
+                        onClick = { onCalendarPreferenceChange(CalendarPreference.GREGORIAN) },
+                        label = { Text(strings.calendarGregorian) },
+                        modifier = Modifier.testTag("calendar_gregorian_chip")
                     )
                 }
             }
@@ -239,6 +304,64 @@ fun SettingsScreen(
                 icon = Icons.Default.Key,
                 title = strings.sectionAiConfiguration
             ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        verticalAlignment = Alignment.Top,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = strings.aiSetupHint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                OutlinedButton(
+                    onClick = {
+                        val clip = clipboard.getText()?.text.orEmpty()
+                        val (parsedUrl, parsedKey) = AiSearchClient.parseCredentialsText(clip)
+                        if (parsedUrl == null && parsedKey == null) {
+                            inlineStatusMessage = strings.smartPasteEmpty
+                        } else {
+                            if (parsedUrl != null) {
+                                baseUrl = parsedUrl
+                                if (parsedUrl.contains("generativelanguage.googleapis.com", ignoreCase = true)) {
+                                    provider = AiProviderType.GEMINI_REST
+                                } else if (provider == AiProviderType.GEMINI_REST) {
+                                    provider = AiProviderType.OPENAI_COMPATIBLE
+                                }
+                            }
+                            if (parsedKey != null) {
+                                apiKey = parsedKey
+                            }
+                            inlineStatusMessage = strings.smartPasteApplied
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("smart_paste_ai_config_button")
+                ) {
+                    Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(strings.smartPasteConfig)
+                }
+
+                Spacer(Modifier.height(10.dp))
+
                 Text(strings.aiProviderLabel, style = MaterialTheme.typography.labelLarge)
                 Spacer(Modifier.height(6.dp))
                 FlowRow(
@@ -262,7 +385,7 @@ fun SettingsScreen(
                                 if (modelName.isBlank() || modelName == prevDefaultModel) {
                                     modelName = SettingsRepository.defaultModelFor(type)
                                 }
-                                savedBanner = false
+                                inlineStatusMessage = null
                             },
                             label = { Text(label) }
                         )
@@ -275,9 +398,10 @@ fun SettingsScreen(
                     value = baseUrl,
                     onValueChange = {
                         baseUrl = it
-                        savedBanner = false
+                        inlineStatusMessage = null
                     },
                     label = { Text(strings.aiBaseUrlLabel) },
+                    placeholder = { Text("https://.../v1") },
                     singleLine = true,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFontFamily),
                     modifier = Modifier
@@ -285,21 +409,25 @@ fun SettingsScreen(
                         .testTag("ai_base_url_input")
                 )
 
-                Spacer(Modifier.height(10.dp))
-
-                OutlinedTextField(
-                    value = modelName,
-                    onValueChange = {
-                        modelName = it
-                        savedBanner = false
-                    },
-                    label = { Text(strings.aiModelLabel) },
-                    singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFontFamily),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("ai_model_input")
-                )
+                if (AiSearchClient.isValidHttpUrl(baseUrl)) {
+                    val resolvedChatPreview = remember(provider, baseUrl, modelName) {
+                        when (provider) {
+                            AiProviderType.GEMINI_REST -> {
+                                val b = AiSearchClient.normalizeBaseUrl(baseUrl)
+                                val m = modelName.trim().ifBlank { "gemini-2.5-flash" }.removePrefix("models/")
+                                if (b.contains(":generateContent")) b else "$b/models/$m:generateContent"
+                            }
+                            AiProviderType.OPENAI_COMPATIBLE,
+                            AiProviderType.CUSTOM -> AiSearchClient.buildOpenAiChatUrl(baseUrl)
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "${strings.resolvedEndpointLabel}: $resolvedChatPreview",
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
 
                 Spacer(Modifier.height(10.dp))
 
@@ -307,7 +435,7 @@ fun SettingsScreen(
                     value = apiKey,
                     onValueChange = {
                         apiKey = it
-                        savedBanner = false
+                        inlineStatusMessage = null
                     },
                     label = { Text(strings.aiApiKeyLabel) },
                     singleLine = true,
@@ -326,16 +454,95 @@ fun SettingsScreen(
                         .testTag("ai_api_key_input")
                 )
 
+                Spacer(Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = modelName,
+                        onValueChange = {
+                            modelName = it
+                            inlineStatusMessage = null
+                        },
+                        label = { Text(strings.aiModelLabel) },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFontFamily),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("ai_model_input")
+                    )
+                    OutlinedButton(
+                        onClick = { onFetchModels(provider, baseUrl, apiKey) },
+                        enabled = modelsState !is ModelsFetchState.Loading &&
+                            AiSearchClient.isValidHttpUrl(baseUrl) &&
+                            apiKey.isNotBlank(),
+                        modifier = Modifier.testTag("fetch_models_button")
+                    ) {
+                        if (modelsState is ModelsFetchState.Loading) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(strings.fetchModels)
+                        }
+                    }
+                }
+
+                when (modelsState) {
+                    is ModelsFetchState.Success -> {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "${strings.fetchedModelsLabel} (${DateUtils.formatNumber(modelsState.models.size, isPersian)})",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            modelsState.models.take(20).forEach { fetchedModel ->
+                                FilterChip(
+                                    selected = modelName.trim() == fetchedModel,
+                                    onClick = {
+                                        modelName = fetchedModel
+                                        inlineStatusMessage = null
+                                    },
+                                    label = {
+                                        Text(
+                                            text = fetchedModel,
+                                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily)
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("fetched_model_chip")
+                                )
+                            }
+                        }
+                    }
+                    is ModelsFetchState.Error -> {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = modelsState.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    else -> Unit
+                }
+
                 Spacer(Modifier.height(12.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Button(
                         onClick = {
                             onSaveAiConfig(provider, baseUrl, modelName, apiKey)
-                            savedBanner = true
+                            inlineStatusMessage = strings.aiConfigSaved
                         },
                         modifier = Modifier
                             .weight(1f)
@@ -345,7 +552,7 @@ fun SettingsScreen(
                     }
                     OutlinedButton(
                         onClick = {
-                            savedBanner = false
+                            inlineStatusMessage = null
                             onTestAiConnection(provider, baseUrl, modelName, apiKey)
                         },
                         enabled = testState !is ConnectionTestState.Testing,
@@ -361,10 +568,29 @@ fun SettingsScreen(
                     }
                 }
 
-                if (savedBanner) {
-                    Spacer(Modifier.height(8.dp))
+                if (apiKey.isNotBlank() || settings.aiApiKey.isNotBlank()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(
+                            onClick = {
+                                onClearAiConfig()
+                                inlineStatusMessage = strings.aiConfigCleared
+                            },
+                            modifier = Modifier.testTag("clear_ai_config_button")
+                        ) {
+                            Icon(Icons.Default.DeleteOutline, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(strings.clearAiConfig)
+                        }
+                    }
+                }
+
+                inlineStatusMessage?.let { msg ->
+                    Spacer(Modifier.height(6.dp))
                     Text(
-                        text = strings.aiConfigSaved,
+                        text = msg,
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.secondary
                     )
@@ -416,7 +642,270 @@ fun SettingsScreen(
                 }
             }
 
-            // 4. Appearance
+            // 4. Google Drive Backup & Restore
+            SettingsSectionCard(
+                icon = Icons.Default.Backup,
+                title = strings.sectionGoogleDriveBackup
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (driveState.isConnected) {
+                        MaterialTheme.colorScheme.secondaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainerHigh
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (driveState.isConnected) Icons.Default.CloudDone else Icons.Default.CloudOff,
+                            contentDescription = null,
+                            tint = if (driveState.isConnected) {
+                                MaterialTheme.colorScheme.secondary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (driveState.isConnected) {
+                                    val email = driveState.accountEmail.ifBlank { "Google Account" }
+                                    "${strings.driveConnectedLabel}: $email"
+                                } else {
+                                    strings.driveNotConnectedHint
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            if (settings.lastDriveBackupMs > 0L) {
+                                val tsLabel = DateUtils.formatDateTime(
+                                    settings.lastDriveBackupMs,
+                                    calendarMode,
+                                    usePersianDigits = isPersian
+                                )
+                                Text(
+                                    text = "${strings.lastBackupLabel}: $tsLabel",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                Text(strings.backupScopeLabel, style = MaterialTheme.typography.labelLarge)
+                Spacer(Modifier.height(6.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FilterChip(
+                        selected = settings.backupIncludeSms,
+                        onClick = {
+                            onBackupScopeChange(
+                                !settings.backupIncludeSms,
+                                settings.backupIncludeNotifications
+                            )
+                        },
+                        label = { Text(strings.includeSmsLabel) },
+                        modifier = Modifier.testTag("backup_scope_sms_chip")
+                    )
+                    FilterChip(
+                        selected = settings.backupIncludeNotifications,
+                        onClick = {
+                            onBackupScopeChange(
+                                settings.backupIncludeSms,
+                                !settings.backupIncludeNotifications
+                            )
+                        },
+                        label = { Text(strings.includeNotificationsLabel) },
+                        modifier = Modifier.testTag("backup_scope_notifications_chip")
+                    )
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                if (!driveState.isConnected) {
+                    Button(
+                        onClick = onConnectGoogleDrive,
+                        enabled = !driveState.isBusy,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("connect_drive_button")
+                    ) {
+                        if (driveState.isBusy) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(strings.driveConnectButton)
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onBackupToGoogleDrive,
+                            enabled = !driveState.isBusy && (settings.backupIncludeSms || settings.backupIncludeNotifications),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("drive_backup_now_button")
+                        ) {
+                            if (driveState.isBusy) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(strings.backupNowButton)
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = onRefreshDriveBackups,
+                            enabled = !driveState.isBusy,
+                            modifier = Modifier.testTag("drive_refresh_button")
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = strings.refreshDriveBackups, modifier = Modifier.size(16.dp))
+                        }
+                        OutlinedButton(
+                            onClick = onDisconnectGoogleDrive,
+                            enabled = !driveState.isBusy,
+                            modifier = Modifier.testTag("disconnect_drive_button")
+                        ) {
+                            Text(strings.driveDisconnectButton)
+                        }
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    if (driveState.backups.isEmpty() && !driveState.isBusy) {
+                        Text(
+                            text = strings.driveBackupsEmpty,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            for (backup in driveState.backups) {
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = backup.name,
+                                                style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFontFamily),
+                                                maxLines = 1
+                                            )
+                                            val ts = DateUtils.formatDateTime(
+                                                backup.modifiedAtMs,
+                                                calendarMode,
+                                                usePersianDigits = isPersian
+                                            )
+                                            val smsN = DateUtils.formatNumber(backup.smsCount, isPersian)
+                                            val notifN = DateUtils.formatNumber(backup.notificationCount, isPersian)
+                                            Text(
+                                                text = "$ts • $smsN ${strings.smsLabel} • $notifN ${strings.notificationLabel}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        OutlinedButton(
+                                            onClick = { onRestoreFromGoogleDrive(backup.id) },
+                                            enabled = !driveState.isBusy && (settings.backupIncludeSms || settings.backupIncludeNotifications),
+                                            modifier = Modifier.testTag("drive_restore_button")
+                                        ) {
+                                            Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(strings.restoreButton)
+                                        }
+                                        IconButton(
+                                            onClick = { onDeleteDriveBackup(backup.id) },
+                                            enabled = !driveState.isBusy
+                                        ) {
+                                            Icon(
+                                                Icons.Default.DeleteOutline,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.error
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
+                Spacer(Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onExportLocalBackup,
+                        enabled = !driveState.isBusy && (settings.backupIncludeSms || settings.backupIncludeNotifications),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("export_local_backup_button")
+                    ) {
+                        Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(strings.exportLocalBackup)
+                    }
+                    OutlinedButton(
+                        onClick = onImportLocalBackup,
+                        enabled = !driveState.isBusy && (settings.backupIncludeSms || settings.backupIncludeNotifications),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("import_local_backup_button")
+                    ) {
+                        Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(strings.importLocalBackup)
+                    }
+                }
+
+                driveState.statusMessage?.let { statusMsg ->
+                    Spacer(Modifier.height(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (driveState.isError) {
+                            MaterialTheme.colorScheme.errorContainer
+                        } else {
+                            MaterialTheme.colorScheme.secondaryContainer
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = statusMsg,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (driveState.isError) {
+                                MaterialTheme.colorScheme.onErrorContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSecondaryContainer
+                            },
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
+                }
+            }
+
+            // 5. Appearance
             SettingsSectionCard(
                 icon = Icons.Default.Palette,
                 title = strings.sectionAppearance

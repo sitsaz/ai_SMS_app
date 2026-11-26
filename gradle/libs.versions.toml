@@ -42,6 +42,7 @@ credentials = "1.5.0"
 googleid = "1.1.1"
 kotlinxSerializationJson = "1.8.0"
 persianDate = "1.7.1"
+playServicesAuth = "21.3.0"
 
 
 [libraries]
@@ -98,6 +99,7 @@ androidx-credentials-play-services = { group = "androidx.credentials", name = "c
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerializationJson" }
 persian-date = { group = "com.github.samanzamani", name = "PersianDate", version.ref = "persianDate" }
+play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
 
 
 [plugins]

@@ -1,5 +1,7 @@
 package com.example.core.compat
 
+import android.Manifest
+import android.app.Activity
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -7,10 +9,12 @@ import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.provider.Telephony
 import android.telephony.SmsManager
+import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 
@@ -22,10 +26,52 @@ object AndroidCompat {
             PackageManager.PERMISSION_GRANTED
     }
 
+    fun hasReadSmsPermission(context: Context): Boolean =
+        hasPermission(context, Manifest.permission.READ_SMS)
+
+    fun hasSendSmsPermission(context: Context): Boolean =
+        hasPermission(context, Manifest.permission.SEND_SMS)
+
     fun hasCoreSmsPermissions(context: Context): Boolean {
-        return hasPermission(context, android.Manifest.permission.READ_SMS) &&
-            hasPermission(context, android.Manifest.permission.SEND_SMS) &&
-            hasPermission(context, android.Manifest.permission.RECEIVE_SMS)
+        return hasPermission(context, Manifest.permission.READ_SMS) &&
+            hasPermission(context, Manifest.permission.SEND_SMS) &&
+            hasPermission(context, Manifest.permission.RECEIVE_SMS)
+    }
+
+    fun requiredMessagingPermissions(): Array<String> {
+        val perms = mutableListOf(
+            Manifest.permission.READ_SMS,
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.RECEIVE_SMS,
+            Manifest.permission.READ_CONTACTS
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        return perms.toTypedArray()
+    }
+
+    fun findActivity(context: Context): Activity? {
+        var current: Context? = context
+        while (current is android.content.ContextWrapper) {
+            if (current is Activity) return current
+            current = current.baseContext
+        }
+        return current as? Activity
+    }
+
+    fun shouldShowSmsRationale(activity: Activity?): Boolean {
+        if (activity == null) return false
+        return ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.READ_SMS) ||
+            ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.SEND_SMS) ||
+            ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.RECEIVE_SMS)
+    }
+
+    fun createAppDetailsSettingsIntent(context: Context): Intent {
+        return Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.fromParts("package", context.packageName, null)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
     }
 
     fun isDefaultSmsApp(context: Context): Boolean {

@@ -1,14 +1,14 @@
 package com.example
 
-import android.Manifest
 import android.content.Intent
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.google.android.gms.auth.api.identity.Identity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
@@ -60,11 +60,14 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.example.core.compat.AndroidCompat
 import com.example.core.localization.DateUtils
+import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
 import com.example.core.localization.resolveIsPersian
 import com.example.data.search.ArchiveItemSource
 import com.example.data.search.SearchResultItem
+import com.example.ui.components.SmsPermissionRationaleDialog
+import com.example.ui.components.SmsPermissionSettingsDialog
 import com.example.ui.navigation.MessagesRoute
 import com.example.ui.navigation.NotificationsRoute
 import com.example.ui.navigation.SearchRoute
@@ -98,12 +101,14 @@ class MainActivity : ComponentActivity() {
         setContent {
             val settingsVm: SettingsViewModel = viewModel()
             val settings by settingsVm.settings.collectAsStateWithLifecycle()
+            val calendarMode by settingsVm.calendarMode.collectAsStateWithLifecycle()
             val isPersian = settings.language.resolveIsPersian()
 
             AiSmsManagerTheme(
                 themeMode = settings.themeMode,
                 dynamicColor = settings.dynamicColor,
-                isPersian = isPersian
+                isPersian = isPersian,
+                calendarMode = calendarMode
             ) {
                 AiSmsManagerRoot(
                     settingsVm = settingsVm,
@@ -134,14 +139,20 @@ private fun AiSmsManagerRoot(
     val scope = rememberCoroutineScope()
     val strings = LocalStrings.current
     val isPersian = LocalIsPersian.current
+    val calendarMode = LocalCalendarMode.current
 
     val settings by settingsVm.settings.collectAsStateWithLifecycle()
     val testState by settingsVm.testState.collectAsStateWithLifecycle()
+    val modelsState by settingsVm.modelsState.collectAsStateWithLifecycle()
+    val driveState by settingsVm.driveState.collectAsStateWithLifecycle()
     val conversations by mainVm.conversations.collectAsStateWithLifecycle()
     val contacts by mainVm.contacts.collectAsStateWithLifecycle()
     val notifications by mainVm.notifications.collectAsStateWithLifecycle()
     val isSyncing by mainVm.isSyncing.collectAsStateWithLifecycle()
     val systemStatus by mainVm.systemStatus.collectAsStateWithLifecycle()
+    val isSmsSearchExpanded by mainVm.isSmsSearchExpanded.collectAsStateWithLifecycle()
+    val smsSearchQuery by mainVm.smsSearchQuery.collectAsStateWithLifecycle()
+    val smsSearchResults by mainVm.smsSearchResults.collectAsStateWithLifecycle()
 
     val filterState by searchAiVm.filterState.collectAsStateWithLifecycle()
     val localResults by searchAiVm.localResults.collectAsStateWithLifecycle()
@@ -157,17 +168,128 @@ private fun AiSmsManagerRoot(
     val xmlPreview by searchAiVm.xmlPreview.collectAsStateWithLifecycle()
 
     var selectedNotificationDetail by remember { mutableStateOf<SearchResultItem?>(null) }
+    var showSmsRationaleDialog by remember { mutableStateOf(false) }
+    var showSmsSettingsDialog by remember { mutableStateOf(false) }
+    var hasPromptedSmsPermissionsOnce by remember { mutableStateOf(false) }
+    val activity = remember(context) { AndroidCompat.findActivity(context) }
 
     val permissionsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) {
+    ) { results ->
+        hasPromptedSmsPermissionsOnce = true
         mainVm.syncAllIfPermitted()
+        val hasCoreSms = AndroidCompat.hasCoreSmsPermissions(context)
+        if (!hasCoreSms && results.isNotEmpty()) {
+            if (AndroidCompat.shouldShowSmsRationale(activity)) {
+                showSmsRationaleDialog = true
+            } else {
+                showSmsSettingsDialog = true
+            }
+        }
     }
 
     val defaultSmsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) {
         mainVm.syncAllIfPermitted()
+    }
+
+    val driveAuthLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { activityResult ->
+        try {
+            val authResult = Identity.getAuthorizationClient(context)
+                .getAuthorizationResultFromIntent(activityResult.data)
+            val token = authResult.accessToken
+            if (!token.isNullOrBlank()) {
+                settingsVm.onDriveAuthorized(token, isPersian)
+            } else {
+                settingsVm.onDriveAuthFailed(
+                    if (isPersian) "توکن دسترسی Google Drive دریافت نشد." else "Google Drive access token was empty."
+                )
+            }
+        } catch (e: Exception) {
+            settingsVm.onDriveAuthFailed(
+                e.localizedMessage ?: if (isPersian) "ورود به Google Drive لغو شد." else "Google Drive sign-in cancelled."
+            )
+        }
+    }
+
+    val connectGoogleDrive = {
+        val targetActivity = activity
+        if (targetActivity == null) {
+            settingsVm.onDriveAuthFailed("Activity unavailable")
+        } else {
+            Identity.getAuthorizationClient(targetActivity)
+                .authorize(settingsVm.buildDriveAuthorizationRequest())
+                .addOnSuccessListener { result ->
+                    val pendingIntent = result.pendingIntent
+                    if (result.hasResolution() && pendingIntent != null) {
+                        driveAuthLauncher.launch(
+                            IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                        )
+                    } else {
+                        val token = result.accessToken
+                        if (!token.isNullOrBlank()) {
+                            settingsVm.onDriveAuthorized(token, isPersian)
+                        } else {
+                            settingsVm.onDriveAuthFailed(
+                                if (isPersian) "توکن Google Drive دریافت نشد." else "No access token returned."
+                            )
+                        }
+                    }
+                }
+                .addOnFailureListener { e ->
+                    settingsVm.onDriveAuthFailed(
+                        e.localizedMessage ?: if (isPersian) "خطا در اتصال به Google Drive" else "Google Drive authorization failed"
+                    )
+                }
+        }
+    }
+
+    val exportBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                runCatching {
+                    val json = settingsVm.exportLocalBackupJson()
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(json.toByteArray(Charsets.UTF_8))
+                    } ?: error("Cannot open output stream")
+                }.onSuccess {
+                    settingsVm.setLocalDriveMessage(
+                        if (isPersian) "فایل بکاپ با موفقیت ذخیره شد." else "Backup JSON saved."
+                    )
+                }.onFailure { err ->
+                    settingsVm.setLocalDriveMessage(
+                        err.localizedMessage ?: "Export failed",
+                        isError = true
+                    )
+                }
+            }
+        }
+    }
+
+    val importBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                runCatching {
+                    context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use {
+                        it.readText()
+                    } ?: error("Cannot read selected file")
+                }.onSuccess { rawJson ->
+                    settingsVm.importLocalBackupJson(rawJson, isPersian)
+                }.onFailure { err ->
+                    settingsVm.setLocalDriveMessage(
+                        err.localizedMessage ?: "Import failed",
+                        isError = true
+                    )
+                }
+            }
+        }
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -201,17 +323,20 @@ private fun AiSmsManagerRoot(
         }
     }
 
+    val launchSystemPermissionPrompt = {
+        permissionsLauncher.launch(AndroidCompat.requiredMessagingPermissions())
+    }
+
     val requestAllNeededPermissions = {
-        val perms = mutableListOf(
-            Manifest.permission.READ_SMS,
-            Manifest.permission.SEND_SMS,
-            Manifest.permission.RECEIVE_SMS,
-            Manifest.permission.READ_CONTACTS
-        )
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        if (!AndroidCompat.hasCoreSmsPermissions(context)) {
+            if (AndroidCompat.shouldShowSmsRationale(activity) || !hasPromptedSmsPermissionsOnce) {
+                showSmsRationaleDialog = true
+            } else {
+                launchSystemPermissionPrompt()
+            }
+        } else {
+            launchSystemPermissionPrompt()
         }
-        permissionsLauncher.launch(perms.toTypedArray())
     }
 
     val requestDefaultSmsRole = {
@@ -269,11 +394,16 @@ private fun AiSmsManagerRoot(
                         contacts = contacts,
                         systemStatus = systemStatus,
                         isSyncing = isSyncing,
+                        isSearchExpanded = isSmsSearchExpanded,
+                        searchQuery = smsSearchQuery,
+                        searchResults = smsSearchResults,
+                        onSearchExpandedChange = mainVm::setSmsSearchExpanded,
+                        onSearchQueryChange = mainVm::updateSmsSearchQuery,
                         onRequestPermissions = requestAllNeededPermissions,
                         onRequestDefaultSms = requestDefaultSmsRole,
                         onSyncSms = { mainVm.syncAllIfPermitted() },
-                        onOpenThread = { threadId, address ->
-                            navController.navigate(ThreadRoute(threadId, address, -1L))
+                        onOpenThread = { threadId, address, targetMsgId ->
+                            navController.navigate(ThreadRoute(threadId, address, targetMsgId))
                         },
                         onStartChatWithAddress = { address ->
                             scope.launch {
@@ -339,7 +469,10 @@ private fun AiSmsManagerRoot(
                         settings = settings,
                         systemStatus = systemStatus,
                         testState = testState,
+                        modelsState = modelsState,
+                        driveState = driveState,
                         onLanguageChange = settingsVm::setLanguage,
+                        onCalendarPreferenceChange = settingsVm::setCalendarPreference,
                         onThemeModeChange = settingsVm::setThemeMode,
                         onDynamicColorChange = settingsVm::setDynamicColor,
                         onCaptureNotificationsChange = settingsVm::setCaptureNotifications,
@@ -348,6 +481,27 @@ private fun AiSmsManagerRoot(
                         onSaveAiConfig = settingsVm::saveAiConfig,
                         onTestAiConnection = { p, u, m, k ->
                             settingsVm.testAiConnection(p, u, m, k, isPersian)
+                        },
+                        onFetchModels = { p, u, k ->
+                            settingsVm.fetchModels(p, u, k, isPersian)
+                        },
+                        onClearAiConfig = settingsVm::clearAiConfig,
+                        onBackupScopeChange = settingsVm::setBackupScope,
+                        onConnectGoogleDrive = { connectGoogleDrive() },
+                        onDisconnectGoogleDrive = { settingsVm.disconnectDrive(isPersian) },
+                        onRefreshDriveBackups = { settingsVm.refreshDriveBackups(isPersian) },
+                        onBackupToGoogleDrive = { settingsVm.backupToGoogleDrive(isPersian) },
+                        onRestoreFromGoogleDrive = { fileId ->
+                            settingsVm.restoreFromGoogleDrive(fileId, isPersian)
+                        },
+                        onDeleteDriveBackup = { fileId ->
+                            settingsVm.deleteDriveBackup(fileId, isPersian)
+                        },
+                        onExportLocalBackup = {
+                            exportBackupLauncher.launch("ai_sms_backup_${System.currentTimeMillis()}.json")
+                        },
+                        onImportLocalBackup = {
+                            importBackupLauncher.launch(arrayOf("application/json", "text/plain"))
                         }
                     )
                 }
@@ -362,6 +516,8 @@ private fun AiSmsManagerRoot(
                         address = route.address,
                         targetMessageId = route.targetMessageId,
                         messages = threadMessages,
+                        hasSendSmsPermission = systemStatus.hasSendSmsPermission,
+                        onRequestSmsPermissions = requestAllNeededPermissions,
                         onBack = { navController.popBackStack() },
                         onMarkRead = { mainVm.markThreadRead(route.threadId) },
                         onSendSms = { text ->
@@ -503,7 +659,7 @@ private fun AiSmsManagerRoot(
             title = { Text("${notifItem.senderDisplayName} • ${notifItem.senderSecondary}") },
             text = {
                 Text(
-                    text = "${notifItem.body}\n\n${DateUtils.formatDateTime(notifItem.timestamp, isPersian)}",
+                    text = "${notifItem.body}\n\n${DateUtils.formatDateTime(notifItem.timestamp, calendarMode, usePersianDigits = isPersian)}",
                     style = MaterialTheme.typography.bodyMedium
                 )
             },
@@ -522,6 +678,28 @@ private fun AiSmsManagerRoot(
                     Text(strings.cancel)
                 }
             }
+        )
+    }
+
+    if (showSmsRationaleDialog) {
+        SmsPermissionRationaleDialog(
+            strings = strings,
+            onConfirm = {
+                showSmsRationaleDialog = false
+                launchSystemPermissionPrompt()
+            },
+            onDismiss = { showSmsRationaleDialog = false }
+        )
+    }
+
+    if (showSmsSettingsDialog) {
+        SmsPermissionSettingsDialog(
+            strings = strings,
+            onOpenSettings = {
+                showSmsSettingsDialog = false
+                context.startActivity(AndroidCompat.createAppDetailsSettingsIntent(context))
+            },
+            onDismiss = { showSmsSettingsDialog = false }
         )
     }
 }

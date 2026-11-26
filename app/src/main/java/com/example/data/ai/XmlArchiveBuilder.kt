@@ -1,11 +1,16 @@
 package com.example.data.ai
 
 import com.example.core.localization.AppStrings
+import com.example.core.localization.CalendarMode
 import com.example.core.localization.DateUtils
+import com.example.data.local.AiContextMode
 import com.example.data.local.ArchiveRangePreset
 import com.example.data.local.NotificationDao
+import com.example.data.local.NotificationItem
 import com.example.data.local.SmsDao
+import com.example.data.local.SmsMessage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.util.Calendar
 
@@ -16,7 +21,8 @@ data class XmlArchiveBuildResult(
     val totalBytes: Int,
     val startMs: Long,
     val endMs: Long,
-    val rangeLabel: String
+    val rangeLabel: String,
+    val contextMode: AiContextMode = AiContextMode.COMPACT_TEXT
 ) {
     val totalCount: Int get() = smsCount + notificationCount
 }
@@ -74,6 +80,157 @@ class XmlArchiveBuilder(
         val smsCount = if (includeSms) smsDao.countSmsInRange(startMs, endMs) else 0
         val notifCount = if (includeNotifications) notificationDao.countNotificationsInRange(startMs, endMs) else 0
         smsCount to notifCount
+    }
+
+    suspend fun buildContextForAi(
+        question: String,
+        contextMode: AiContextMode,
+        preset: ArchiveRangePreset,
+        customStartMs: Long,
+        customEndMs: Long,
+        maxItems: Int,
+        includeSms: Boolean,
+        includeNotifications: Boolean,
+        isPersian: Boolean,
+        strings: AppStrings
+    ): XmlArchiveBuildResult {
+        return when (contextMode) {
+            AiContextMode.INLINE_XML -> buildXml(
+                preset = preset,
+                customStartMs = customStartMs,
+                customEndMs = customEndMs,
+                maxItems = maxItems,
+                includeSms = includeSms,
+                includeNotifications = includeNotifications,
+                isPersian = isPersian,
+                strings = strings
+            )
+            AiContextMode.COMPACT_TEXT,
+            AiContextMode.KEYWORD_PREFILTER -> buildCompactPlainTextContext(
+                question = question,
+                keywordPriorityOnly = (contextMode == AiContextMode.KEYWORD_PREFILTER),
+                contextMode = contextMode,
+                preset = preset,
+                customStartMs = customStartMs,
+                customEndMs = customEndMs,
+                maxItems = maxItems,
+                includeSms = includeSms,
+                includeNotifications = includeNotifications,
+                isPersian = isPersian,
+                strings = strings
+            )
+        }
+    }
+
+    private suspend fun buildCompactPlainTextContext(
+        question: String,
+        keywordPriorityOnly: Boolean,
+        contextMode: AiContextMode,
+        preset: ArchiveRangePreset,
+        customStartMs: Long,
+        customEndMs: Long,
+        maxItems: Int,
+        includeSms: Boolean,
+        includeNotifications: Boolean,
+        isPersian: Boolean,
+        strings: AppStrings
+    ): XmlArchiveBuildResult = withContext(Dispatchers.IO) {
+        val (startMs, endMs) = resolveBounds(preset, customStartMs, customEndMs)
+        val safeMax = maxItems.coerceIn(10, 1000)
+        val fetchPoolSize = (safeMax * 3).coerceAtMost(1200)
+
+        val keywords = extractSearchKeywords(question)
+        val ftsQuery = buildFtsOrQuery(keywords)
+
+        val smsPool = if (includeSms) {
+            val baseList = smsDao.getSmsInRange(startMs, endMs, fetchPoolSize)
+            val ftsHits = if (ftsQuery != null) {
+                runCatching { smsDao.searchSmsFts(ftsQuery, startMs, endMs).first() }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+            (ftsHits + baseList).distinctBy { it.id }
+        } else {
+            emptyList()
+        }
+
+        val notifPool = if (includeNotifications) {
+            val baseList = notificationDao.getNotificationsInRange(startMs, endMs, fetchPoolSize)
+            val ftsHits = if (ftsQuery != null) {
+                runCatching { notificationDao.searchNotificationsFts(ftsQuery, startMs, endMs).first() }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+            (ftsHits + baseList).distinctBy { it.id }
+        } else {
+            emptyList()
+        }
+
+        data class ScoredLine(val score: Int, val ts: Long, val line: String, val isSms: Boolean)
+
+        val scored = ArrayList<ScoredLine>(smsPool.size + notifPool.size)
+        for (sms in smsPool) {
+            val score = scoreTextMatch(
+                keywords = keywords,
+                fields = listOf(sms.contactName.orEmpty(), sms.address, sms.sender, sms.body)
+            )
+            scored.add(ScoredLine(score, sms.timestamp, formatCompactSmsLine(sms), isSms = true))
+        }
+        for (notif in notifPool) {
+            val score = scoreTextMatch(
+                keywords = keywords,
+                fields = listOf(notif.appName, notif.senderOrTitle, notif.body, notif.subText)
+            )
+            scored.add(ScoredLine(score, notif.timestamp, formatCompactNotifLine(notif), isSms = false))
+        }
+
+        val matchedCount = scored.count { it.score > 0 }
+        val selected = if (keywordPriorityOnly && matchedCount > 0) {
+            val targetCap = safeMax.coerceAtMost(120)
+            val matches = scored.filter { it.score > 0 }
+                .sortedWith(compareByDescending<ScoredLine> { it.score }.thenByDescending { it.ts })
+                .take(targetCap)
+            if (matches.size < targetCap / 2) {
+                val extra = scored.filter { it.score == 0 }
+                    .sortedByDescending { it.ts }
+                    .take((targetCap - matches.size).coerceAtMost(35))
+                matches + extra
+            } else {
+                matches
+            }
+        } else {
+            scored.sortedWith(compareByDescending<ScoredLine> { it.score }.thenByDescending { it.ts })
+                .take(safeMax)
+        }
+
+        val actualSmsCount = selected.count { it.isSms }
+        val actualNotifCount = selected.count { !it.isSms }
+        val rangeLabel = presetLabel(preset, startMs, endMs, isPersian, strings)
+        val calLabel = if (isPersian) "jalali" else "gregorian"
+
+        val textPayload = buildString {
+            append("ARCHIVE DIGEST (Plain-Text, No File Upload)\n")
+            append("Range: ").append(rangeLabel)
+            append(" | Calendar: ").append(calLabel)
+            append(" | Items: ").append(selected.size)
+            append(" (SMS=").append(actualSmsCount).append(", Notifications=").append(actualNotifCount).append(")\n")
+            append("Format: [id] date | dir_or_app | sender | content\n")
+            append("---\n")
+            for (entry in selected) {
+                append(entry.line).append('\n')
+            }
+        }
+
+        XmlArchiveBuildResult(
+            xmlContent = textPayload,
+            smsCount = actualSmsCount,
+            notificationCount = actualNotifCount,
+            totalBytes = textPayload.toByteArray(Charsets.UTF_8).size,
+            startMs = startMs,
+            endMs = endMs,
+            rangeLabel = rangeLabel,
+            contextMode = contextMode
+        )
     }
 
     suspend fun buildXml(
@@ -167,8 +324,28 @@ class XmlArchiveBuilder(
             totalBytes = xml.toByteArray(Charsets.UTF_8).size,
             startMs = startMs,
             endMs = endMs,
-            rangeLabel = rangeLabel
+            rangeLabel = rangeLabel,
+            contextMode = AiContextMode.INLINE_XML
         )
+    }
+
+    private fun formatCompactSmsLine(sms: SmsMessage): String {
+        val sender = sms.contactName?.takeIf { it.isNotBlank() }?.let { "$it (${sms.address})" } ?: sms.address
+        val dir = if (sms.isOutgoing) "OUT" else "IN"
+        val dateJ = DateUtils.formatDateTime(sms.timestamp, CalendarMode.JALALI, usePersianDigits = false)
+        val dateG = DateUtils.formatDateTime(sms.timestamp, CalendarMode.GREGORIAN, usePersianDigits = false)
+        val cleanBody = sms.body.replace('\n', ' ').trim()
+        return "[sms:${sms.id}] $dateJ ($dateG) | $dir | $sender | $cleanBody"
+    }
+
+    private fun formatCompactNotifLine(notif: NotificationItem): String {
+        val dateJ = DateUtils.formatDateTime(notif.timestamp, CalendarMode.JALALI, usePersianDigits = false)
+        val dateG = DateUtils.formatDateTime(notif.timestamp, CalendarMode.GREGORIAN, usePersianDigits = false)
+        val cleanBody = buildString {
+            append(notif.body.replace('\n', ' ').trim())
+            if (notif.subText.isNotBlank()) append(" (${notif.subText.trim()})")
+        }
+        return "[notif:${notif.id}] $dateJ ($dateG) | ${notif.appName} | ${notif.senderOrTitle} | $cleanBody"
     }
 
     fun presetLabel(
@@ -193,6 +370,63 @@ class XmlArchiveBuilder(
     }
 
     companion object {
+        private val stopWords = setOf(
+            "the", "and", "for", "with", "from", "that", "this", "what", "which", "when",
+            "where", "about", "find", "show", "search", "messages", "message", "sms", "notif",
+            "notification", "notifications", "please", "tell", "have", "has", "was", "were",
+            "از", "به", "در", "با", "برای", "که", "این", "آن", "های", "را", "می", "شد", "است",
+            "هست", "بود", "کدام", "کدوم", "چند", "چقدر", "درباره", "پیامک", "پیام", "اعلان", "نوتیفیکیشن"
+        )
+
+        fun normalizeForMatch(input: String): String {
+            if (input.isEmpty()) return ""
+            val sb = StringBuilder(input.length)
+            for (ch in input) {
+                val mapped = when (ch) {
+                    in '۰'..'۹' -> ('0'.code + (ch.code - '۰'.code)).toChar()
+                    in '٠'..'٩' -> ('0'.code + (ch.code - '٠'.code)).toChar()
+                    'ي', 'ى' -> 'ی'
+                    'ك' -> 'ک'
+                    'ة' -> 'ه'
+                    'أ', 'إ', 'آ' -> 'ا'
+                    else -> ch.lowercaseChar()
+                }
+                sb.append(mapped)
+            }
+            return sb.toString()
+        }
+
+        fun extractSearchKeywords(question: String): List<String> {
+            val normalized = normalizeForMatch(question)
+            return normalized
+                .split(Regex("""[\s,.;:!?()\[\]{}"'«»/\\|+-]+"""))
+                .map { it.trim() }
+                .filter { it.length >= 2 && it !in stopWords }
+                .distinct()
+                .take(10)
+        }
+
+        fun buildFtsOrQuery(keywords: List<String>): String? {
+            val ftsTerms = keywords
+                .map { token -> token.filter { it.isLetterOrDigit() } }
+                .filter { it.length >= 2 }
+                .distinct()
+            if (ftsTerms.isEmpty()) return null
+            return ftsTerms.joinToString(" OR ") { "$it*" }
+        }
+
+        fun scoreTextMatch(keywords: List<String>, fields: List<String>): Int {
+            if (keywords.isEmpty()) return 0
+            val joined = normalizeForMatch(fields.joinToString(" "))
+            var score = 0
+            for (kw in keywords) {
+                if (joined.contains(kw)) {
+                    score += if (kw.any { it.isDigit() }) 4 else 2
+                }
+            }
+            return score
+        }
+
         fun escapeXml(input: String): String {
             if (input.isEmpty()) return ""
             val sb = StringBuilder(input.length + 16)

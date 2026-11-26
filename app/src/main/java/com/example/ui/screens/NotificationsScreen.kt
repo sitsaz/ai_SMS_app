@@ -50,6 +50,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.core.localization.DateUtils
+import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
 import com.example.data.local.NotificationItem
@@ -68,6 +69,7 @@ fun NotificationsScreen(
 ) {
     val strings = LocalStrings.current
     val isPersian = LocalIsPersian.current
+    val calendarMode = LocalCalendarMode.current
     var filterQuery by remember { mutableStateOf("") }
     var showClearDialog by remember { mutableStateOf(false) }
 
@@ -286,7 +288,7 @@ fun NotificationsScreen(
                                 )
                                 Spacer(Modifier.height(8.dp))
                                 Text(
-                                    text = DateUtils.formatDateTime(notif.timestamp, isPersian),
+                                    text = DateUtils.formatDateTime(notif.timestamp, calendarMode, usePersianDigits = isPersian),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

@@ -65,9 +65,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.core.localization.AppStrings
 import com.example.core.localization.DateUtils
+import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalStrings
 import com.example.data.ai.XmlArchiveBuildResult
+import com.example.data.local.AiContextMode
 import com.example.data.local.AiTopicEntity
 import com.example.data.local.ArchiveRangePreset
 import com.example.data.search.SearchResultItem
@@ -106,6 +108,7 @@ fun AiTopicsChatPane(
 ) {
     val strings = LocalStrings.current
     val isPersian = LocalIsPersian.current
+    val calendarMode = LocalCalendarMode.current
     var promptText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
@@ -176,17 +179,24 @@ fun AiTopicsChatPane(
         ) {
             val activePresetLabel = presetDisplayName(scopeDraft.preset, strings)
             val maxStr = DateUtils.formatNumber(scopeDraft.maxItems, isPersian)
+            val modeShort = contextModeLabel(scopeDraft.contextMode, strings)
             AssistChip(
                 onClick = onOpenScopeEditor,
                 leadingIcon = {
                     Icon(Icons.Default.CalendarMonth, contentDescription = null, modifier = Modifier.size(16.dp))
                 },
-                label = { Text("$activePresetLabel • Max $maxStr") },
+                label = {
+                    Text(
+                        text = "$activePresetLabel • $modeShort ($maxStr)",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
                 modifier = Modifier.testTag("ai_scope_chip")
             )
             Text(
                 text = if (activeTopic != null) {
-                    DateUtils.formatListTimestamp(activeTopic.updatedAt, isPersian)
+                    DateUtils.formatListTimestamp(activeTopic.updatedAt, calendarMode, isPersianLabels = isPersian)
                 } else {
                     strings.newTopic
                 },
@@ -322,6 +332,22 @@ fun AiTopicsChatPane(
                                             )
                                         }
                                     }
+                                    if (!isUser && !msg.isError && item.parsedResponse?.summary?.isNotBlank() == true) {
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(bottom = 8.dp)
+                                        ) {
+                                            Text(
+                                                text = "${strings.aiSummaryLabel}: ${item.parsedResponse.summary}",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                            )
+                                        }
+                                    }
                                     Text(
                                         text = msg.text,
                                         style = MaterialTheme.typography.bodyMedium,
@@ -367,14 +393,61 @@ fun AiTopicsChatPane(
                                     modifier = Modifier.padding(horizontal = 4.dp)
                                 )
                                 Spacer(Modifier.height(6.dp))
+                                val reasonMap = item.parsedResponse?.matches
+                                    ?.associate { it.refId to it.relevanceReason }
+                                    .orEmpty()
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     for (matched in item.matchedItems) {
+                                        val reason = reasonMap[matched.refId].orEmpty()
+                                        if (reason.isNotBlank()) {
+                                            Text(
+                                                text = "${strings.aiMatchReasonPrefix}: $reason",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.secondary,
+                                                modifier = Modifier.padding(horizontal = 6.dp)
+                                            )
+                                        }
                                         SearchResultCard(
                                             item = matched,
                                             highlightQuery = "",
                                             isPersian = isPersian,
                                             strings = strings,
                                             onClick = { onMatchedItemClick(matched) }
+                                        )
+                                    }
+                                }
+                            }
+
+                            val followUps = item.parsedResponse?.suggestedFollowUps.orEmpty()
+                            if (!isUser && !msg.isError && followUps.isNotEmpty()) {
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    text = strings.suggestedFollowUpsLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 4.dp)
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    for (q in followUps) {
+                                        AssistChip(
+                                            onClick = {
+                                                if (!isAiSending && isAiConfigured) {
+                                                    onAskQuestion(q)
+                                                }
+                                            },
+                                            label = {
+                                                Text(
+                                                    text = q,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
                                         )
                                     }
                                 }
@@ -530,14 +603,41 @@ private fun ArchiveHistoryPromptSheet(
                 }
             }
 
+            val calendarMode = LocalCalendarMode.current
             if (draft.preset == ArchiveRangePreset.CUSTOM && draft.customStartMs > 0L) {
-                val startTxt = DateUtils.formatDateShort(draft.customStartMs, isPersian)
-                val endTxt = DateUtils.formatDateShort(draft.customEndMs, isPersian)
+                val startTxt = DateUtils.formatDateShort(draft.customStartMs, calendarMode, usePersianDigits = isPersian)
+                val endTxt = DateUtils.formatDateShort(draft.customEndMs, calendarMode, usePersianDigits = isPersian)
                 AssistChip(
                     onClick = { showCustomPicker = true },
                     leadingIcon = { Icon(Icons.Default.CalendarMonth, contentDescription = null, modifier = Modifier.size(16.dp)) },
                     label = { Text("$startTxt – $endTxt") }
                 )
+            }
+
+            HorizontalDivider()
+
+            Text(strings.aiContextModeLabel, style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = strings.contextNoUploadHint,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                listOf(
+                    AiContextMode.COMPACT_TEXT to strings.contextCompactText,
+                    AiContextMode.KEYWORD_PREFILTER to strings.contextKeywordPrefilter,
+                    AiContextMode.INLINE_XML to strings.contextInlineXml
+                ).forEach { (mode, label) ->
+                    FilterChip(
+                        selected = draft.contextMode == mode,
+                        onClick = { onUpdateDraft { it.copy(contextMode = mode) } },
+                        label = { Text(label) },
+                        modifier = Modifier.testTag("ai_context_mode_${mode.name}")
+                    )
+                }
             }
 
             HorizontalDivider()
@@ -624,6 +724,12 @@ private fun ArchiveHistoryPromptSheet(
             }
         )
     }
+}
+
+private fun contextModeLabel(mode: AiContextMode, strings: AppStrings): String = when (mode) {
+    AiContextMode.COMPACT_TEXT -> strings.contextCompactText
+    AiContextMode.KEYWORD_PREFILTER -> strings.contextKeywordPrefilter
+    AiContextMode.INLINE_XML -> strings.contextInlineXml
 }
 
 private fun presetDisplayName(preset: ArchiveRangePreset, strings: AppStrings): String = when (preset) {

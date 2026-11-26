@@ -7,27 +7,38 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.AiSmsApplication
 import com.example.core.compat.AndroidCompat
-import com.example.data.local.NotificationItem
 import com.example.data.local.ConversationRow
+import com.example.data.local.NotificationItem
 import com.example.data.local.SmsMessage
+import com.example.data.search.SearchResultItem
+import com.example.data.search.toSearchResult
 import com.example.data.sms.ContactItem
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 data class SystemStatusState(
     val hasSmsPermissions: Boolean = false,
+    val hasReadSmsPermission: Boolean = false,
+    val hasSendSmsPermission: Boolean = false,
     val hasContactsPermission: Boolean = false,
     val isDefaultSmsApp: Boolean = false,
     val isNotificationListenerEnabled: Boolean = false
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val container = (application as AiSmsApplication).container
+    private val smsDao = container.database.smsDao()
     private val smsRepository = container.smsRepository
     private val contactsRepository = container.contactsRepository
     private val notificationRepository = container.notificationRepository
@@ -36,6 +47,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val notifications: StateFlow<List<NotificationItem>> = notificationRepository.observeAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    private val _isSmsSearchExpanded = MutableStateFlow(false)
+    val isSmsSearchExpanded: StateFlow<Boolean> = _isSmsSearchExpanded.asStateFlow()
+
+    private val _smsSearchQuery = MutableStateFlow("")
+    val smsSearchQuery: StateFlow<String> = _smsSearchQuery.asStateFlow()
+
+    val smsSearchResults: StateFlow<List<SearchResultItem>> = _smsSearchQuery
+        .flatMapLatest { raw ->
+            val cleanQuery = raw.trim()
+            if (cleanQuery.isEmpty()) {
+                flowOf(emptyList())
+            } else {
+                val ftsQuery = buildFtsPrefixQuery(cleanQuery)
+                if (ftsQuery != null) {
+                    combine(
+                        smsDao.searchSmsFts(ftsQuery, 0L, 0L),
+                        smsDao.searchSms(cleanQuery, 0L, 0L)
+                    ) { ftsHits, likeHits ->
+                        (ftsHits + likeHits)
+                            .distinctBy { it.id }
+                            .sortedByDescending { it.timestamp }
+                            .map { it.toSearchResult() }
+                    }
+                } else {
+                    smsDao.searchSms(cleanQuery, 0L, 0L)
+                        .map { list -> list.map { it.toSearchResult() } }
+                }
+            }
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _contacts = MutableStateFlow<List<ContactItem>>(emptyList())
@@ -52,10 +94,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         syncAllIfPermitted()
     }
 
+    fun setSmsSearchExpanded(expanded: Boolean) {
+        _isSmsSearchExpanded.value = expanded
+        if (!expanded) {
+            _smsSearchQuery.value = ""
+        }
+    }
+
+    fun updateSmsSearchQuery(query: String) {
+        _smsSearchQuery.value = query
+    }
+
     fun refreshSystemStatuses() {
         val ctx = getApplication<Application>()
         _systemStatus.value = SystemStatusState(
             hasSmsPermissions = AndroidCompat.hasCoreSmsPermissions(ctx),
+            hasReadSmsPermission = AndroidCompat.hasReadSmsPermission(ctx),
+            hasSendSmsPermission = AndroidCompat.hasSendSmsPermission(ctx),
             hasContactsPermission = AndroidCompat.hasPermission(ctx, Manifest.permission.READ_CONTACTS),
             isDefaultSmsApp = AndroidCompat.isDefaultSmsApp(ctx),
             isNotificationListenerEnabled = AndroidCompat.isNotificationListenerEnabled(ctx)
@@ -130,4 +185,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun buildSaveContactIntent(phoneNumber: String): Intent =
         contactsRepository.buildSaveOrEditContactIntent(phoneNumber)
+
+    private fun buildFtsPrefixQuery(raw: String): String? {
+        val tokens = raw.split(Regex("""\s+"""))
+            .map { token -> token.filter { it.isLetterOrDigit() } }
+            .filter { it.length >= 2 }
+        if (tokens.isEmpty()) return null
+        return tokens.joinToString(" ") { "$it*" }
+    }
 }

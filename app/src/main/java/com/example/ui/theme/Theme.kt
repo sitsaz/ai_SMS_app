@@ -13,6 +13,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import com.example.core.localization.AppLanguage
+import com.example.core.localization.CalendarMode
+import com.example.core.localization.DateUtils
+import com.example.core.localization.LocalCalendarMode
 import com.example.core.localization.LocalIsPersian
 import com.example.core.localization.LocalLocaleManager
 import com.example.core.localization.LocalStrings
@@ -67,6 +70,7 @@ fun AiSmsManagerTheme(
     themeMode: ThemeMode = ThemeMode.SYSTEM,
     dynamicColor: Boolean = true,
     isPersian: Boolean = false,
+    calendarMode: CalendarMode = DateUtils.calendarModeFor(isPersian),
     content: @Composable () -> Unit
 ) {
     val systemDark = isSystemInDarkTheme()
@@ -94,6 +98,7 @@ fun AiSmsManagerTheme(
         LocalLocaleManager provides localeManager,
         LocalStrings provides localeManager.strings,
         LocalIsPersian provides localeManager.isPersian,
+        LocalCalendarMode provides calendarMode,
         LocalLayoutDirection provides localeManager.layoutDirection
     ) {
         MaterialTheme(

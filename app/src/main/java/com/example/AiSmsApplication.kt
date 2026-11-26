@@ -2,7 +2,9 @@ package com.example
 
 import android.app.Application
 import com.example.data.ai.AiSearchClient
+import com.example.data.ai.DynamicAiRetrofitProvider
 import com.example.data.ai.XmlArchiveBuilder
+import com.example.data.drive.GoogleDriveBackupManager
 import com.example.data.local.SmsArchiveDatabase
 import com.example.data.preferences.SettingsRepository
 import com.example.data.search.ArchiveSearchRepository
@@ -33,7 +35,15 @@ class AppContainer(application: Application) {
     val xmlArchiveBuilder: XmlArchiveBuilder by lazy {
         XmlArchiveBuilder(database.smsDao(), database.notificationDao())
     }
-    val aiSearchClient: AiSearchClient by lazy { AiSearchClient() }
+    val dynamicAiRetrofitProvider: DynamicAiRetrofitProvider by lazy {
+        DynamicAiRetrofitProvider()
+    }
+    val aiSearchClient: AiSearchClient by lazy {
+        AiSearchClient(dynamicAiRetrofitProvider)
+    }
+    val googleDriveBackupManager: GoogleDriveBackupManager by lazy {
+        GoogleDriveBackupManager(database.smsDao(), database.notificationDao())
+    }
 }
 
 class AiSmsApplication : Application() {

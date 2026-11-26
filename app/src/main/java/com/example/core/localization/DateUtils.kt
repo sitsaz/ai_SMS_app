@@ -1,5 +1,9 @@
 package com.example.core.localization
 
+import androidx.compose.runtime.staticCompositionLocalOf
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import saman.zamani.persiandate.PersianDate
 import saman.zamani.persiandate.PersianDateFormat
 import java.text.SimpleDateFormat
@@ -13,11 +17,36 @@ enum class CalendarMode {
     JALALI
 }
 
+enum class CalendarPreference {
+    AUTO,
+    JALALI,
+    GREGORIAN;
+
+    fun resolve(isPersianLanguage: Boolean): CalendarMode = when (this) {
+        AUTO -> if (isPersianLanguage) CalendarMode.JALALI else CalendarMode.GREGORIAN
+        JALALI -> CalendarMode.JALALI
+        GREGORIAN -> CalendarMode.GREGORIAN
+    }
+}
+
+val LocalCalendarMode = staticCompositionLocalOf { CalendarMode.GREGORIAN }
+
 /**
  * Unified calendar & date formatting utility powered by com.github.samanzamani:PersianDate.
- * Toggles dynamically between Jalali (Persian) and Gregorian (English) calendars across the UI.
+ * Reactively follows the global CalendarMode StateFlow / DataStore preference to toggle
+ * between Jalali and Gregorian calendars across the UI.
  */
 object DateUtils {
+
+    private val _calendarModeFlow = MutableStateFlow(CalendarMode.GREGORIAN)
+    val calendarModeFlow: StateFlow<CalendarMode> = _calendarModeFlow.asStateFlow()
+
+    val currentCalendarMode: CalendarMode
+        get() = _calendarModeFlow.value
+
+    fun updateCalendarMode(mode: CalendarMode) {
+        _calendarModeFlow.value = mode
+    }
 
     private val persianDigits = charArrayOf('۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹')
     private val englishShortMonths = listOf(
@@ -58,13 +87,23 @@ object DateUtils {
     }
 
     fun formatDateTime(timestampMs: Long, isPersian: Boolean): String {
-        return formatDateTime(timestampMs, calendarModeFor(isPersian))
+        return formatDateTime(timestampMs, calendarModeFor(isPersian), usePersianDigits = isPersian)
     }
 
-    fun formatDateTime(timestampMs: Long, mode: CalendarMode): String {
+    fun formatDateTime(
+        timestampMs: Long,
+        mode: CalendarMode = currentCalendarMode,
+        usePersianDigits: Boolean = (mode == CalendarMode.JALALI)
+    ): String {
         return when (mode) {
-            CalendarMode.JALALI -> formatJalaliDateTime(timestampMs)
-            CalendarMode.GREGORIAN -> formatGregorianDateTime(timestampMs)
+            CalendarMode.JALALI -> {
+                val raw = formatJalaliDateTime(timestampMs)
+                if (usePersianDigits) raw else toEnglishDigits(raw)
+            }
+            CalendarMode.GREGORIAN -> {
+                val raw = formatGregorianDateTime(timestampMs)
+                if (usePersianDigits) toPersianDigits(raw) else raw
+            }
         }
     }
 
@@ -84,22 +123,36 @@ object DateUtils {
     }
 
     fun formatDateShort(timestampMs: Long, isPersian: Boolean): String {
-        return formatDateShort(timestampMs, calendarModeFor(isPersian))
+        return formatDateShort(timestampMs, calendarModeFor(isPersian), usePersianDigits = isPersian)
     }
 
-    fun formatDateShort(timestampMs: Long, mode: CalendarMode): String {
+    fun formatDateShort(
+        timestampMs: Long,
+        mode: CalendarMode = currentCalendarMode,
+        usePersianDigits: Boolean = (mode == CalendarMode.JALALI)
+    ): String {
         return when (mode) {
             CalendarMode.JALALI -> {
                 val pDate = PersianDate(timestampMs)
-                toPersianDigits(PersianDateFormat("j F Y").format(pDate))
+                val formatted = PersianDateFormat("j F Y").format(pDate)
+                if (usePersianDigits) toPersianDigits(formatted) else toEnglishDigits(formatted)
             }
             CalendarMode.GREGORIAN -> {
-                SimpleDateFormat("MMM d, yyyy", Locale.US).format(Date(timestampMs))
+                val formatted = SimpleDateFormat("MMM d, yyyy", Locale.US).format(Date(timestampMs))
+                if (usePersianDigits) toPersianDigits(formatted) else formatted
             }
         }
     }
 
     fun formatListTimestamp(timestampMs: Long, isPersian: Boolean): String {
+        return formatListTimestamp(timestampMs, calendarModeFor(isPersian), isPersianLabels = isPersian)
+    }
+
+    fun formatListTimestamp(
+        timestampMs: Long,
+        mode: CalendarMode = currentCalendarMode,
+        isPersianLabels: Boolean = (mode == CalendarMode.JALALI)
+    ): String {
         val now = System.currentTimeMillis()
         val todayStart = startOfTodayMillis()
         val yesterdayStart = todayStart - 86_400_000L
@@ -112,24 +165,28 @@ object DateUtils {
                     cal.get(Calendar.HOUR_OF_DAY),
                     cal.get(Calendar.MINUTE)
                 )
-                if (isPersian) toPersianDigits(raw) else raw
+                if (isPersianLabels) toPersianDigits(raw) else raw
             }
-            timestampMs >= yesterdayStart -> if (isPersian) "دیروز" else "Yesterday"
+            timestampMs >= yesterdayStart -> if (isPersianLabels) "دیروز" else "Yesterday"
             else -> {
-                if (isPersian) {
-                    val pMsg = PersianDate(timestampMs)
-                    val pNow = PersianDate(now)
-                    val formatted = if (pMsg.shYear == pNow.shYear) {
-                        PersianDateFormat("j F").format(pMsg)
-                    } else {
-                        PersianDateFormat("Y/m/d").format(pMsg)
+                when (mode) {
+                    CalendarMode.JALALI -> {
+                        val pMsg = PersianDate(timestampMs)
+                        val pNow = PersianDate(now)
+                        val formatted = if (pMsg.shYear == pNow.shYear) {
+                            PersianDateFormat("j F").format(pMsg)
+                        } else {
+                            PersianDateFormat("Y/m/d").format(pMsg)
+                        }
+                        if (isPersianLabels) toPersianDigits(formatted) else toEnglishDigits(formatted)
                     }
-                    toPersianDigits(formatted)
-                } else {
-                    val nowCal = Calendar.getInstance().apply { timeInMillis = now }
-                    val msgCal = Calendar.getInstance().apply { timeInMillis = timestampMs }
-                    val pattern = if (nowCal.get(Calendar.YEAR) == msgCal.get(Calendar.YEAR)) "MMM d" else "MMM d, yy"
-                    SimpleDateFormat(pattern, Locale.US).format(Date(timestampMs))
+                    CalendarMode.GREGORIAN -> {
+                        val nowCal = Calendar.getInstance().apply { timeInMillis = now }
+                        val msgCal = Calendar.getInstance().apply { timeInMillis = timestampMs }
+                        val pattern = if (nowCal.get(Calendar.YEAR) == msgCal.get(Calendar.YEAR)) "MMM d" else "MMM d, yy"
+                        val formatted = SimpleDateFormat(pattern, Locale.US).format(Date(timestampMs))
+                        if (isPersianLabels) toPersianDigits(formatted) else formatted
+                    }
                 }
             }
         }
@@ -175,24 +232,38 @@ object DateUtils {
     }
 
     fun daysInMonth(year: Int, month: Int, isPersian: Boolean): Int {
+        return daysInMonth(year, month, calendarModeFor(isPersian))
+    }
+
+    fun daysInMonth(year: Int, month: Int, mode: CalendarMode = currentCalendarMode): Int {
         val safeMonth = month.coerceIn(1, 12)
-        return if (isPersian) {
-            PersianDate().apply { initJalaliDate(year, safeMonth, 1) }.monthDays
-        } else {
-            when (safeMonth) {
-                2 -> if ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)) 29 else 28
-                4, 6, 9, 11 -> 30
-                else -> 31
+        return when (mode) {
+            CalendarMode.JALALI -> {
+                PersianDate().apply { initJalaliDate(year, safeMonth, 1) }.monthDays
+            }
+            CalendarMode.GREGORIAN -> {
+                when (safeMonth) {
+                    2 -> if ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)) 29 else 28
+                    4, 6, 9, 11 -> 30
+                    else -> 31
+                }
             }
         }
     }
 
     fun monthName(month: Int, isPersian: Boolean): String {
+        return monthName(month, calendarModeFor(isPersian))
+    }
+
+    fun monthName(month: Int, mode: CalendarMode = currentCalendarMode): String {
         val safeMonth = month.coerceIn(1, 12)
-        return if (isPersian) {
-            PersianDate().apply { initJalaliDate(1405, safeMonth, 1) }.monthName()
-        } else {
-            englishShortMonths.getOrElse(safeMonth - 1) { safeMonth.toString() }
+        return when (mode) {
+            CalendarMode.JALALI -> {
+                PersianDate().apply { initJalaliDate(1405, safeMonth, 1) }.monthName()
+            }
+            CalendarMode.GREGORIAN -> {
+                englishShortMonths.getOrElse(safeMonth - 1) { safeMonth.toString() }
+            }
         }
     }
 
@@ -201,20 +272,31 @@ object DateUtils {
         isPersian: Boolean,
         timeZone: TimeZone = TimeZone.getDefault()
     ): Triple<Int, Int, Int> {
+        return getYearMonthDay(timestampMs, calendarModeFor(isPersian), timeZone)
+    }
+
+    fun getYearMonthDay(
+        timestampMs: Long,
+        mode: CalendarMode = currentCalendarMode,
+        timeZone: TimeZone = TimeZone.getDefault()
+    ): Triple<Int, Int, Int> {
         val cal = Calendar.getInstance(timeZone).apply { timeInMillis = timestampMs }
-        return if (isPersian) {
-            val j = gregorianToJalali(
-                cal.get(Calendar.YEAR),
-                cal.get(Calendar.MONTH) + 1,
-                cal.get(Calendar.DAY_OF_MONTH)
-            )
-            Triple(j.year, j.month, j.day)
-        } else {
-            Triple(
-                cal.get(Calendar.YEAR),
-                cal.get(Calendar.MONTH) + 1,
-                cal.get(Calendar.DAY_OF_MONTH)
-            )
+        return when (mode) {
+            CalendarMode.JALALI -> {
+                val j = gregorianToJalali(
+                    cal.get(Calendar.YEAR),
+                    cal.get(Calendar.MONTH) + 1,
+                    cal.get(Calendar.DAY_OF_MONTH)
+                )
+                Triple(j.year, j.month, j.day)
+            }
+            CalendarMode.GREGORIAN -> {
+                Triple(
+                    cal.get(Calendar.YEAR),
+                    cal.get(Calendar.MONTH) + 1,
+                    cal.get(Calendar.DAY_OF_MONTH)
+                )
+            }
         }
     }
 
@@ -226,12 +308,22 @@ object DateUtils {
         endOfDay: Boolean = false,
         timeZone: TimeZone = TimeZone.getDefault()
     ): Long {
+        return toEpochMillis(year, month, day, calendarModeFor(isPersian), endOfDay, timeZone)
+    }
+
+    fun toEpochMillis(
+        year: Int,
+        month: Int,
+        day: Int,
+        mode: CalendarMode = currentCalendarMode,
+        endOfDay: Boolean = false,
+        timeZone: TimeZone = TimeZone.getDefault()
+    ): Long {
         val safeMonth = month.coerceIn(1, 12)
-        val safeDay = day.coerceIn(1, daysInMonth(year, safeMonth, isPersian))
-        val (gy, gm, gd) = if (isPersian) {
-            jalaliToGregorian(year, safeMonth, safeDay)
-        } else {
-            Triple(year, safeMonth, safeDay)
+        val safeDay = day.coerceIn(1, daysInMonth(year, safeMonth, mode))
+        val (gy, gm, gd) = when (mode) {
+            CalendarMode.JALALI -> jalaliToGregorian(year, safeMonth, safeDay)
+            CalendarMode.GREGORIAN -> Triple(year, safeMonth, safeDay)
         }
         return Calendar.getInstance(timeZone).apply {
             set(Calendar.YEAR, gy)
