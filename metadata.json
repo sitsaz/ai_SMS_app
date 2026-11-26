@@ -1,0 +1,6 @@
+{
+  "name": "AI SMS Manager",
+  "description": "Bilingual (Persian Jalali & English) Default SMS Manager and real-time Notification Archive with full-text search, deep thread jumping, and multi-topic AI XML chat search.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
